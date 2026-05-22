@@ -358,6 +358,7 @@ dependencies = [
 [[package]]
 name = "cain_core"
 version = "0.1.0"
+source = "git+ssh://git@gitlab.com/agent-cain/core.git#bfe973342315da63054a7f6c97e1e26e72eac7ce"
 dependencies = [
  "anyhow",
  "async-nats",

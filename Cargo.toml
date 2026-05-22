@@ -12,7 +12,7 @@ name = "flare_solver"
 path = "src/main.rs"
 
 [dependencies]
-cain_core   = { path = "../core" }
+cain_core   = { git = "ssh://git@gitlab.com/agent-cain/core.git" }
 axum        = "0.7"
 tokio       = { version = "1", features = ["full"] }
 serde       = { version = "1", features = ["derive"] }
