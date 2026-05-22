@@ -1,0 +1,2 @@
+[registries.agent-cain-core]
+index = "sparse+https://gitlab.com/api/v4/projects/agent-cain%2Fcore/packages/cargo/"

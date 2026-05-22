@@ -1,0 +1,30 @@
+[package]
+name = "flare_solver"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "flare_solver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flare_solver"
+path = "src/main.rs"
+
+[dependencies]
+cain_core   = { path = "../core" }
+axum        = "0.7"
+tokio       = { version = "1", features = ["full"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+uuid        = { version = "1", features = ["v4"] }
+dashmap     = "6"
+thiserror   = "2"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow      = "1"
+futures     = "0.3"
+chaser-oxide = { git = "https://github.com/0xchasercat/chaser-oxide" }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
