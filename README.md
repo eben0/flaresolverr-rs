@@ -1,7 +1,7 @@
 # flaresolverr-rs
 
 [![CI](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml)
-[![Security Audit](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml/badge.svg?label=audit)](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml)
+[![Semgrep](https://github.com/eben0/flaresolverr-rs/actions/workflows/semgrep.yml/badge.svg)](https://github.com/eben0/flaresolverr-rs/actions/workflows/semgrep.yml)
 [![Crates.io](https://img.shields.io/crates/v/flaresolverr-rs)](https://crates.io/crates/flaresolverr-rs)
 
 A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — a reverse proxy that bypasses Cloudflare and similar bot-protection challenges using a headless Chromium browser with protocol-level stealth.
