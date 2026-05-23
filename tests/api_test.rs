@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 async fn start_test_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let store = Arc::new(flaresolverr_rs::session::SessionStore::new(true));
+    let store = Arc::new(flaresolverr_rs::session::SessionStore::new(true, false));
     let router = flaresolverr_rs::router::create_router(store);
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
