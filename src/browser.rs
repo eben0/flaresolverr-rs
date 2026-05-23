@@ -105,6 +105,7 @@ pub struct PageResult {
 
 pub struct BrowserSession {
     browser: Browser,
+    profile: ChaserProfile,
 }
 
 impl BrowserSession {
@@ -132,9 +133,11 @@ impl BrowserSession {
             }
         });
 
-        Ok(Self { browser })
+        Ok(Self { browser, profile: ChaserProfile::native().build() })
     }
 
+    /// Open a tab, run the fetch, then always close the tab — success or error.
+    /// Prevents tab accumulation: chromiumoxide does not close pages on Drop.
     pub async fn fetch(&self, req: FetchRequest) -> Result<PageResult> {
         let page = self
             .browser
@@ -143,9 +146,14 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         let chaser = ChaserPage::new(page);
-        let profile = ChaserProfile::native().build();
+        let result = self.do_fetch(&chaser, req).await;
+        let _ = chaser.raw_page().clone().close().await; // always close regardless of outcome
+        result
+    }
+
+    async fn do_fetch(&self, chaser: &ChaserPage, req: FetchRequest) -> Result<PageResult> {
         chaser
-            .apply_profile(&profile)
+            .apply_profile(&self.profile)
             .await
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
@@ -192,7 +200,8 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         // Drain response events to find the main-document response headers.
-        // Events fired before goto() returned are already queued in the channel.
+        // Drop the stream as soon as we find it — frees the buffered sub-resource
+        // events (images, scripts, fonts) that accumulated during page load.
         let mut headers: HashMap<String, String> = HashMap::new();
         let mut http_status = 200u16;
         let mut found_document = false;
@@ -212,9 +221,10 @@ impl BrowserSession {
                         found_document = true;
                     }
                 }
-                _ => break, // timeout or stream closed
+                _ => break,
             }
         }
+        drop(response_events); // free buffered sub-resource events immediately
 
         let html = chaser
             .content()
