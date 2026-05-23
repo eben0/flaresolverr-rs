@@ -25,21 +25,26 @@ from tabulate import tabulate
 PY_URL = "http://localhost:8191/v1"
 RS_URL = "http://localhost:8192/v1"
 
+# Plain baseline — no Cloudflare, just measures raw browser overhead.
 PLAIN_URLS = [
-    ("example.com",   "https://example.com"),
-    ("httpbin.org",   "https://httpbin.org/get"),
+    ("httpbin.org",  "https://httpbin.org/get"),
 ]
 
+# Real-world Cloudflare-protected sites (from FlareSolverr's own tests_sites.py).
+# These require actual CF bypass to return 200; failures mean the bypass is broken.
 CF_URLS = [
     ("nowsecure.nl",  "https://nowsecure.nl"),
-    ("cfspeedtest",   "https://www.cloudflare.com/cdn-cgi/trace"),
+    ("idope.se",      "https://idope.se/browse.html"),
+    ("bt4g.org",      "https://bt4g.org/search/2022"),
+    ("yts",           "https://yts.unblockninja.com/api/v2/list_movies.json?query_term=&limit=50&sort=date_added"),
 ]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def fetch(base_url: str, url: str, session_id: Optional[str] = None, timeout_s: int = 60) -> tuple[float, bool, int]:
-    """Returns (elapsed_s, success, http_status)."""
+def fetch(base_url: str, url: str, session_id: Optional[str] = None, timeout_s: int = 60) -> tuple[float, bool, int, bool]:
+    """Returns (elapsed_s, success, http_status, cf_solved).
+    success = API reported ok AND http_status == 200."""
     payload = {"cmd": "request.get", "url": url, "maxTimeout": timeout_s * 1000}
     if session_id:
         payload["session"] = session_id
@@ -48,11 +53,15 @@ def fetch(base_url: str, url: str, session_id: Optional[str] = None, timeout_s: 
         r = requests.post(base_url, json=payload, timeout=timeout_s + 10)
         elapsed = time.perf_counter() - t0
         body = r.json()
-        ok = body.get("status") == "ok"
-        status = body.get("solution", {}).get("status", 0) if ok else 0
-        return elapsed, ok, status
-    except Exception as e:
-        return time.perf_counter() - t0, False, 0
+        api_ok = body.get("status") == "ok"
+        solution = body.get("solution") or {}
+        http_status = solution.get("status", 0) if api_ok else 0
+        ok = api_ok and http_status == 200
+        cookies = solution.get("cookies", []) if ok else []
+        cf_solved = any(c.get("name") == "cf_clearance" for c in cookies)
+        return elapsed, ok, http_status, cf_solved
+    except Exception:
+        return time.perf_counter() - t0, False, 0, False
 
 
 def create_session(base_url: str) -> Optional[str]:
@@ -60,6 +69,10 @@ def create_session(base_url: str) -> Optional[str]:
         r = requests.post(base_url, json={"cmd": "sessions.create"}, timeout=30)
         body = r.json()
         if body.get("status") == "ok":
+            # Python FlareSolverr returns session ID in top-level "session" field
+            if body.get("session"):
+                return body["session"]
+            # Rust returns it embedded in "message": "Session created: <id>"
             msg = body.get("message", "")
             prefix = "Session created: "
             if prefix in msg:
@@ -99,18 +112,22 @@ def run_mode(base_url: str, test_url: str, n: int, mode: str) -> dict:
     mode: "ephemeral" — new Chrome per request
           "session"   — shared Chrome, first request is cold
     """
-    times, errors = [], 0
+    times, errors, cf_solved_count = [], 0, 0
     session_id = None
 
     if mode == "session":
         session_id = create_session(base_url)
         if not session_id:
-            return {"times": [], "errors": n, "cold": None, "warm": []}
+            return {"times": [], "errors": n, "cold": None, "warm": [], "cf_solved": 0}
 
+    statuses: list[int] = []
     for i in range(n):
-        elapsed, ok, _ = fetch(base_url, test_url, session_id=session_id)
+        elapsed, ok, http_status, cf_solved = fetch(base_url, test_url, session_id=session_id)
+        statuses.append(http_status)
         if ok:
             times.append(elapsed)
+            if cf_solved:
+                cf_solved_count += 1
         else:
             errors += 1
 
@@ -119,7 +136,8 @@ def run_mode(base_url: str, test_url: str, n: int, mode: str) -> dict:
 
     cold = times[0] if times else None
     warm = times[1:] if len(times) > 1 else []
-    return {"times": times, "errors": errors, "cold": cold, "warm": warm}
+    return {"times": times, "errors": errors, "cold": cold, "warm": warm,
+            "cf_solved": cf_solved_count, "statuses": statuses}
 
 
 def run_pair(py_url: str, rs_url: str, label: str, test_url: str, n: int) -> dict:
@@ -133,7 +151,11 @@ def run_pair(py_url: str, rs_url: str, label: str, test_url: str, n: int) -> dic
             for t in r["times"]:
                 print(f" {t:.2f}s", end="", flush=True)
             if r["errors"]:
-                print(f" ({r['errors']} errors)", end="")
+                bad_statuses = [s for s in r.get("statuses", []) if s and s != 200]
+                status_str = f" HTTP {','.join(str(s) for s in sorted(set(bad_statuses)))}" if bad_statuses else ""
+                print(f" ({r['errors']} errors{status_str})", end="")
+            if r.get("cf_solved", 0):
+                print(f" [CF:{r['cf_solved']}/{len(r['times'])}]", end="")
             print()
             results.setdefault(svc_name, {})[mode] = r
     return results
@@ -162,6 +184,16 @@ def _speedup(py_times: list[float], rs_times: list[float]) -> str:
         return f"Rust {1/ratio:.1f}× slower"
 
 
+def _cf_status(result: dict) -> str:
+    n = len(result.get("times", []))
+    solved = result.get("cf_solved", 0)
+    if n == 0:
+        return "—"
+    if solved == 0:
+        return "none"
+    return f"{solved}/{n}"
+
+
 def print_report(all_results: dict) -> None:
     rows = []
     for label, pair in all_results.items():
@@ -178,23 +210,30 @@ def print_report(all_results: dict) -> None:
                 rs_cold = f"{rs.get('cold'):.2f}s" if rs.get("cold") else "—"
                 py_warm = _stats(py.get("warm", []))
                 rs_warm = _stats(rs.get("warm", []))
-                rows.append([label, "session cold", py_cold, rs_cold, _speedup([py.get("cold")] if py.get("cold") else [], [rs.get("cold")] if rs.get("cold") else [])])
-                rows.append(["", "session warm", py_warm, rs_warm, _speedup(py.get("warm", []), rs.get("warm", []))])
+                rows.append([label, "session cold", py_cold, rs_cold,
+                              _speedup([py.get("cold")] if py.get("cold") else [], [rs.get("cold")] if rs.get("cold") else []),
+                              "—", "—"])
+                rows.append(["", "session warm", py_warm, rs_warm,
+                              _speedup(py.get("warm", []), rs.get("warm", [])),
+                              "—", "—"])
             else:
-                rows.append([label, "ephemeral", _stats(py_times), _stats(rs_times), _speedup(py_times, rs_times)])
+                rows.append([label, "ephemeral", _stats(py_times), _stats(rs_times),
+                              _speedup(py_times, rs_times),
+                              _cf_status(py), _cf_status(rs)])
 
-    print("\n" + "=" * 85)
+    print("\n" + "=" * 100)
     print(tabulate(
         rows,
-        headers=["URL", "Mode", "Python", "Rust", "Δ"],
+        headers=["URL", "Mode", "Python", "Rust", "Δ", "CF-py", "CF-rs"],
         tablefmt="simple",
     ))
-    print("=" * 85)
+    print("=" * 100)
     print()
     print("Notes:")
-    print("  ephemeral  = new Chrome instance per request (includes browser startup)")
+    print("  ephemeral    = new Chrome instance per request (includes browser startup)")
     print("  session cold = first request on a named session (browser startup + CF challenge)")
     print("  session warm = subsequent requests on same session (bypasses challenge)")
+    print("  CF-py/CF-rs  = requests where cf_clearance cookie was returned (solved/total)")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -203,8 +242,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark FlareSolverr Python vs Rust")
     parser.add_argument("--requests", type=int, default=5, metavar="N",
                         help="requests per test (default: 5)")
-    parser.add_argument("--cf", action="store_true",
-                        help="include Cloudflare-protected test URLs")
+    parser.add_argument("--no-cf", action="store_true",
+                        help="skip Cloudflare-protected test URLs (plain baseline only)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -221,7 +260,7 @@ def main() -> None:
         print("\nStart both services first:\n  docker compose up -d")
         sys.exit(1)
 
-    urls = PLAIN_URLS + (CF_URLS if args.cf else [])
+    urls = PLAIN_URLS + ([] if args.no_cf else CF_URLS)
     all_results: dict = {}
 
     for label, test_url in urls:

@@ -10,6 +10,42 @@ Every request is routed through a headless Chromium instance ([chaser-oxide](htt
 
 Named sessions keep a Chrome instance alive across requests so that bypass cookies persist and subsequent requests on the same domain skip the challenge entirely.
 
+## Installation
+
+Add to your `Cargo.toml` to use flaresolverr-rs as a library — no HTTP server needed, no serialization overhead. The browser runs in-process and you get `PageResult` directly:
+
+```toml
+[dependencies]
+flaresolverr-rs = "0.1"
+```
+
+Chromium or Google Chrome must be installed on the host (`CHROME_PATH` env var if it's in a non-standard location).
+
+See [Use as a library](#use-as-a-library) for usage examples.
+
+---
+
+## Docker
+
+```yaml
+services:
+  flaresolverr:
+    image: ghcr.io/eben0/flaresolverr-rs:latest
+    ports:
+      - "8191:8191"
+    shm_size: 1gb
+    environment:
+      - FLARESOLVERR_LOG_LEVEL=info
+      - FLARESOLVERR_NO_SANDBOX=true   # required in Docker (seccomp disables Chrome sandbox)
+    restart: unless-stopped
+```
+
+`shm_size: 1gb` — Chromium needs more than the default 64 MB of shared memory or it crashes on large pages.
+
+`FLARESOLVERR_NO_SANDBOX=true` — Docker's default seccomp profile disables Linux user namespaces, which Chrome's sandbox relies on. This is the standard workaround for containerised Chrome.
+
+---
+
 ## API
 
 Single endpoint: `POST /v1`
@@ -217,15 +253,6 @@ curl -s -X POST http://localhost:8191/v1 \
 curl -s -X POST http://localhost:8191/v1 \
   -H "Content-Type: application/json" \
   -d "{\"cmd\":\"sessions.destroy\",\"session\":\"$SESSION\"}"
-```
-
----
-
-## Docker
-
-```bash
-docker build -t flaresolverr-rs .
-docker run -p 8191:8191 flaresolverr-rs
 ```
 
 ---
