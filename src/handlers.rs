@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, Json};
 
-use crate::browser::BrowserSession;
+use crate::browser::{BrowserSession, FetchRequest};
 use crate::error::{FlareSolverError, Result};
 use crate::models::{Solution, SolveRequest, SolveResponse};
 use crate::session::SessionStore;
@@ -44,22 +44,30 @@ async fn handle_fetch(
         .url
         .ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
 
-    let cookies = req.cookies.as_deref().unwrap_or_default();
-    let post_data = if is_post { req.post_data.as_deref() } else { None };
-    let timeout_ms = req.max_timeout;
-    let return_screenshot = req.return_screenshot.unwrap_or(false);
     let proxy_url = req.proxy.as_ref().map(|p| p.url.as_str());
+
+    let fetch_req = {
+        let base = if is_post {
+            FetchRequest::post(&url, req.post_data.as_deref().unwrap_or(""))
+        } else {
+            FetchRequest::get(&url)
+        };
+        let base = base
+            .with_cookies(req.cookies.unwrap_or_default())
+            .timeout(req.max_timeout);
+        if req.return_screenshot.unwrap_or(false) { base.screenshot() } else { base }
+    };
 
     let result = if let Some(ref session_id) = req.session {
         let arc = store
             .get(session_id)
             .ok_or_else(|| FlareSolverError::SessionNotFound(session_id.clone()))?;
         let session = arc.lock().await;
-        session.fetch(&url, cookies, timeout_ms, post_data, return_screenshot).await?
+        session.fetch(fetch_req).await?
     } else {
         // Ephemeral browser: create with proxy, use once, then drop.
         let session = BrowserSession::new(true, proxy_url).await?;
-        session.fetch(&url, cookies, timeout_ms, post_data, return_screenshot).await?
+        session.fetch(fetch_req).await?
     };
 
     let solution = Solution {

@@ -37,6 +37,58 @@ pub fn map_cookie(c: RawCookie) -> ResponseCookie {
     }
 }
 
+// ── FetchRequest (builder) ────────────────────────────────────────────────────
+
+pub struct FetchRequest {
+    pub url: String,
+    pub post_data: Option<String>,
+    pub cookies: Vec<RequestCookie>,
+    pub timeout_ms: u64,
+    pub screenshot: bool,
+}
+
+impl FetchRequest {
+    pub fn get(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            post_data: None,
+            cookies: Vec::new(),
+            timeout_ms: 60_000,
+            screenshot: false,
+        }
+    }
+
+    pub fn post(url: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            post_data: Some(data.into()),
+            cookies: Vec::new(),
+            timeout_ms: 60_000,
+            screenshot: false,
+        }
+    }
+
+    pub fn timeout(mut self, ms: u64) -> Self {
+        self.timeout_ms = ms;
+        self
+    }
+
+    pub fn cookie(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.cookies.push(RequestCookie { name: name.into(), value: value.into() });
+        self
+    }
+
+    pub fn with_cookies(mut self, cookies: Vec<RequestCookie>) -> Self {
+        self.cookies = cookies;
+        self
+    }
+
+    pub fn screenshot(mut self) -> Self {
+        self.screenshot = true;
+        self
+    }
+}
+
 // ── PageResult ────────────────────────────────────────────────────────────────
 
 pub struct PageResult {
@@ -83,14 +135,7 @@ impl BrowserSession {
         Ok(Self { browser })
     }
 
-    pub async fn fetch(
-        &self,
-        url: &str,
-        cookies: &[RequestCookie],
-        timeout_ms: u64,
-        post_data: Option<&str>,
-        return_screenshot: bool,
-    ) -> Result<PageResult> {
+    pub async fn fetch(&self, req: FetchRequest) -> Result<PageResult> {
         let page = self
             .browser
             .new_page("about:blank")
@@ -112,8 +157,8 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         // Inject caller-supplied cookies before navigation.
-        if !cookies.is_empty() {
-            let params: Vec<CookieParam> = cookies
+        if !req.cookies.is_empty() {
+            let params: Vec<CookieParam> = req.cookies
                 .iter()
                 .map(|c| CookieParam::new(c.name.clone(), c.value.clone()))
                 .collect();
@@ -125,8 +170,8 @@ impl BrowserSession {
         }
 
         // For POST: use a self-submitting form via JS navigation.
-        let nav_url: String = if let Some(data) = post_data {
-            let escaped_url = url.replace('"', "\\\"");
+        let nav_url: String = if let Some(ref data) = req.post_data {
+            let escaped_url = req.url.replace('"', "\\\"");
             let escaped_data = data.replace('"', "\\\"");
             format!(
                 "javascript:(function(){{var f=document.createElement('form');\
@@ -138,12 +183,12 @@ impl BrowserSession {
                  document.body.appendChild(f);f.submit();}})();"
             )
         } else {
-            url.to_string()
+            req.url.clone()
         };
 
-        timeout(Duration::from_millis(timeout_ms), chaser.goto(&nav_url))
+        timeout(Duration::from_millis(req.timeout_ms), chaser.goto(&nav_url))
             .await
-            .map_err(|_| FlareSolverError::Timeout(timeout_ms))?
+            .map_err(|_| FlareSolverError::Timeout(req.timeout_ms))?
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         // Drain response events to find the main-document response headers.
@@ -180,7 +225,7 @@ impl BrowserSession {
             .url()
             .await
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?
-            .unwrap_or_else(|| url.to_string());
+            .unwrap_or_else(|| req.url.clone());
 
         // Use Navigation Timing for status only as fallback when headers gave us nothing.
         let status = if http_status != 200 || !found_document {
@@ -224,7 +269,7 @@ impl BrowserSession {
             })
             .collect();
 
-        let screenshot = if return_screenshot {
+        let screenshot = if req.screenshot {
             let png = chaser
                 .raw_page()
                 .screenshot(ScreenshotParams::builder().build())
