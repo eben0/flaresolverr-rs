@@ -11,6 +11,8 @@ pub enum FlareSolverError {
     Browser(String),
     #[error("session not found: {0}")]
     SessionNotFound(String),
+    #[error("session already exists: {0}")]
+    SessionAlreadyExists(String),
     #[error("missing required field: {0}")]
     MissingField(String),
     #[error("unsupported command: {0}")]

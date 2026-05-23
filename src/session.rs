@@ -19,7 +19,7 @@ impl SessionStore {
     pub async fn create(&self, requested_id: Option<String>, proxy: Option<&str>) -> Result<String> {
         let id = requested_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         if self.sessions.contains_key(&id) {
-            return Ok(id);
+            return Err(FlareSolverError::SessionAlreadyExists(id));
         }
         let session = BrowserSession::new(self.headless, proxy).await?;
         self.sessions.insert(id.clone(), Arc::new(Mutex::new(session)));

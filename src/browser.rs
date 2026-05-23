@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use futures::StreamExt;
-use tokio::time::{timeout, Duration};
+use futures::{FutureExt, StreamExt};
+use tokio::time::{timeout, Duration, Instant};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
 use chaser_oxide::cdp::browser_protocol::network::{CookieParam, EventResponseReceived, ResourceType};
 use chaser_oxide::page::ScreenshotParams;
@@ -117,6 +117,12 @@ impl BrowserSession {
             builder.with_head()
         };
         if let Some(p) = proxy.filter(|s| !s.is_empty()) {
+            // Warn if credentials are embedded: they appear in /proc/<pid>/cmdline
+            // and are visible to all local processes. Chrome ignores embedded auth
+            // in --proxy-server; credentials must be handled via CDP auth events.
+            if p.contains('@') {
+                tracing::warn!("proxy URL contains credentials — they will be visible in the process list and are NOT forwarded by Chrome; use CDP proxy auth instead");
+            }
             builder = builder.arg(format!("--proxy-server={p}"));
         }
         let config = builder.build().map_err(|e| FlareSolverError::Browser(e))?;
@@ -146,8 +152,12 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         let chaser = ChaserPage::new(page);
-        let result = self.do_fetch(&chaser, req).await;
-        let _ = chaser.raw_page().clone().close().await; // always close regardless of outcome
+        // catch_unwind ensures page.close() runs even if do_fetch panics.
+        let result = std::panic::AssertUnwindSafe(self.do_fetch(&chaser, req))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(FlareSolverError::Browser("panic in browser fetch".into())));
+        let _ = chaser.raw_page().clone().close().await;
         result
     }
 
@@ -178,16 +188,23 @@ impl BrowserSession {
         }
 
         // For POST: use a self-submitting form via JS navigation.
+        // URL and body are base64-encoded to eliminate any string-injection risk.
+        // Empty-name fields (from empty or missing postData) are skipped via `if(!kv[0])return`.
         let nav_url: String = if let Some(ref data) = req.post_data {
-            let escaped_url = req.url.replace('"', "\\\"");
-            let escaped_data = data.replace('"', "\\\"");
+            let b64_url  = B64.encode(req.url.as_bytes());
+            let b64_data = B64.encode(data.as_bytes());
             format!(
-                "javascript:(function(){{var f=document.createElement('form');\
-                 f.method='POST';f.action=\"{escaped_url}\";\
-                 \"{escaped_data}\".split('&').forEach(function(p){{\
-                 var kv=p.split('=');var i=document.createElement('input');\
-                 i.name=decodeURIComponent(kv[0]||'');\
-                 i.value=decodeURIComponent(kv[1]||'');f.appendChild(i);}});\
+                "javascript:(function(){{\
+                 var u=atob('{b64_url}'),d=atob('{b64_data}');\
+                 var f=document.createElement('form');\
+                 f.method='POST';f.action=u;\
+                 d.split('&').forEach(function(p){{\
+                 var kv=p.split('=');\
+                 if(!kv[0])return;\
+                 var i=document.createElement('input');\
+                 i.name=decodeURIComponent(kv[0]);\
+                 i.value=decodeURIComponent(kv[1]||'');\
+                 f.appendChild(i);}});\
                  document.body.appendChild(f);f.submit();}})();"
             )
         } else {
@@ -200,12 +217,14 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
         // Drain response events to find the main-document response headers.
-        // Drop the stream as soon as we find it — frees the buffered sub-resource
-        // events (images, scripts, fonts) that accumulated during page load.
+        // Total deadline prevents SPAs that emit continuous sub-resource events
+        // from keeping the loop alive until the outer request timeout.
+        // Drop the stream immediately after — frees buffered events from page load.
         let mut headers: HashMap<String, String> = HashMap::new();
         let mut http_status = 200u16;
         let mut found_document = false;
-        while !found_document {
+        let drain_deadline = Instant::now() + Duration::from_millis(2_000);
+        while !found_document && Instant::now() < drain_deadline {
             match timeout(Duration::from_millis(200), response_events.next()).await {
                 Ok(Some(ev)) => {
                     if matches!(ev.r#type, ResourceType::Document) {
@@ -237,8 +256,10 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?
             .unwrap_or_else(|| req.url.clone());
 
-        // Use Navigation Timing for status only as fallback when headers gave us nothing.
-        let status = if http_status != 200 || !found_document {
+        // Use Navigation Timing only when CDP gave us nothing at all (no Document event).
+        // Do NOT override a non-200 status captured from CDP — that would turn a real
+        // 404 into a 200 on browsers that don't expose responseStatus.
+        let status = if !found_document {
             chaser
                 .evaluate(
                     "window.performance.getEntriesByType('navigation')[0]?.responseStatus || 200",
