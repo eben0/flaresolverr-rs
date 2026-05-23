@@ -144,7 +144,7 @@ impl BrowserSession {
             }
             builder = builder.arg(format!("--proxy-server={p}"));
         }
-        let config = builder.build().map_err(|e| FlareSolverError::Browser(e))?;
+        let config = builder.build().map_err(FlareSolverError::Browser)?;
 
         let (browser, mut handler) = Browser::launch(config)
             .await
@@ -196,7 +196,7 @@ impl BrowserSession {
             .url("about:blank")
             .browser_context_id(ctx_id.clone())
             .build()
-            .map_err(|e| FlareSolverError::Browser(e))?;
+            .map_err(FlareSolverError::Browser)?;
 
         let page = self
             .browser
