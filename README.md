@@ -1,5 +1,9 @@
 # flaresolverr-rs
 
+[![CI](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml)
+[![Security Audit](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml/badge.svg?label=audit)](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/flaresolverr-rs)](https://crates.io/crates/flaresolverr-rs)
+
 A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — a reverse proxy that bypasses Cloudflare and similar bot-protection challenges using a headless Chromium browser with protocol-level stealth.
 
 Drop-in replacement: existing code that talks to `http://localhost:8191/v1` works without modification.
@@ -414,6 +418,12 @@ POST /v1
 | `src/handlers.rs` | axum handler: JSON dispatch to request/session commands |
 | `src/router.rs` | `create_router()`: axum Router wiring |
 | `tests/api_test.rs` | Integration tests against a live in-process server |
+
+---
+
+## Security
+
+CI runs `cargo audit` (RustSec advisory database) and `cargo clippy -D warnings` on every push. See [SECURITY.md](SECURITY.md) for the threat model, vulnerability reporting, and how to run scans locally.
 
 ---
 
