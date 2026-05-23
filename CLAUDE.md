@@ -1,4 +1,4 @@
-# flare_solver — Claude Code context
+# flaresolverr-rs — Claude Code context
 
 ## What this is
 
@@ -11,19 +11,19 @@ A Rust port of FlareSolverr: an HTTP API server that bypasses Cloudflare and sim
 Standard build command:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flare_solver \
-~/.cargo/bin/cargo build --manifest-path /mnt/d/git/agent-cain/flare_solver/Cargo.toml
+CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flaresolverr-rs \
+~/.cargo/bin/cargo build --manifest-path /mnt/d/git/flaresolverr-rs/Cargo.toml
 ```
 
 Standard test command:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flare_solver \
-~/.cargo/bin/cargo test --manifest-path /mnt/d/git/agent-cain/flare_solver/Cargo.toml
+CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flaresolverr-rs \
+~/.cargo/bin/cargo test --manifest-path /mnt/d/git/flaresolverr-rs/Cargo.toml
 ```
 
 - `CARGO_TARGET_DIR` is on the WSL native filesystem to avoid NTFS permission issues and for speed.
-- `flare_solver` has **no private git dependencies** — all deps are on crates.io or public GitHub. No SSH key required.
+- `flaresolverr-rs` has **no private git dependencies** — all deps are on crates.io or public GitHub. No SSH key required.
 
 ## chaser-oxide
 

@@ -1,0 +1,43 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    # Required for crates.io trusted publishing (OIDC — no token needed in secrets)
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Unit tests
+        run: cargo test
+
+      # NOTE: cargo publish will fail if chaser-oxide is not yet published to crates.io.
+      # crates.io does not allow git dependencies in published crates.
+      # Options:
+      #   1. Publish chaser-oxide to crates.io and update Cargo.toml to use the version.
+      #   2. Fork chaser-oxide into this repo and inline it.
+      # Until then, this workflow will fail at the publish step.
+      - name: Publish to crates.io
+        run: cargo publish
