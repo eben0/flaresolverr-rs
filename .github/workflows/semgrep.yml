@@ -1,0 +1,36 @@
+name: Semgrep Open Source Scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '0 0 * * 1' # Runs every Monday at midnight
+
+jobs:
+  semgrep-oss:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    # Skip running on automated Dependabot PRs to save CI minutes
+    if: github.actor != 'dependabot[bot]'
+
+    # Required to upload SARIF results to GitHub Code Scanning
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep OSS Scan
+        run: |
+          pip install semgrep
+          semgrep scan --config p/default --sarif --output semgrep.sarif
+
+      - name: Upload SARIF file to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        if: always()
