@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . /build/app
+ARG CACHE_BUST=1
 RUN cargo build --release --bin flaresolverr-rs
 
 FROM debian:trixie-slim AS runtime

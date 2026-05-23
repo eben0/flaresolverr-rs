@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::{FutureExt, StreamExt};
 use tokio::time::{timeout, Duration, Instant};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
 use chaser_oxide::cdp::browser_protocol::network::{CookieParam, EventResponseReceived, ResourceType};
+use chaser_oxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
 use chaser_oxide::page::ScreenshotParams;
 
 use crate::error::{FlareSolverError, Result};
@@ -106,16 +108,33 @@ pub struct PageResult {
 pub struct BrowserSession {
     browser: Browser,
     profile: ChaserProfile,
+    data_dir: PathBuf,
+}
+
+impl Drop for BrowserSession {
+    fn drop(&mut self) {
+        // Only remove dirs we created under our own temp prefix.
+        let expected_base = std::env::temp_dir().join("flaresolverr-rs");
+        if self.data_dir.starts_with(&expected_base) {
+            let _ = std::fs::remove_dir_all(&self.data_dir);
+        }
+    }
 }
 
 impl BrowserSession {
-    pub async fn new(headless: bool, proxy: Option<&str>) -> Result<Self> {
-        let mut builder = BrowserConfig::builder();
+    pub async fn new(headless: bool, no_sandbox: bool, proxy: Option<&str>) -> Result<Self> {
+        let data_dir = std::env::temp_dir()
+            .join("flaresolverr-rs")
+            .join(uuid::Uuid::new_v4().to_string());
+        let mut builder = BrowserConfig::builder().user_data_dir(&data_dir);
         builder = if headless {
             builder.new_headless_mode()
         } else {
             builder.with_head()
         };
+        if no_sandbox {
+            builder = builder.no_sandbox();
+        }
         if let Some(p) = proxy.filter(|s| !s.is_empty()) {
             // Warn if credentials are embedded: they appear in /proc/<pid>/cmdline
             // and are visible to all local processes. Chrome ignores embedded auth
@@ -139,7 +158,7 @@ impl BrowserSession {
             }
         });
 
-        Ok(Self { browser, profile: ChaserProfile::native().build() })
+        Ok(Self { browser, profile: ChaserProfile::native().build(), data_dir })
     }
 
     /// Open a tab, run the fetch, then always close the tab — success or error.
@@ -158,6 +177,41 @@ impl BrowserSession {
             .await
             .unwrap_or_else(|_| Err(FlareSolverError::Browser("panic in browser fetch".into())));
         let _ = chaser.raw_page().clone().close().await;
+        result
+    }
+
+    /// Fetch in an isolated browser context (no new Chrome process).
+    ///
+    /// Creates a fresh context (isolated cookies/storage/cache), opens a tab,
+    /// fetches, closes the tab, then destroys the context. This gives the same
+    /// isolation as a fresh browser without the ~500ms Chrome launch overhead.
+    pub async fn fetch_isolated(&self, req: FetchRequest) -> Result<PageResult> {
+        let ctx_id = self
+            .browser
+            .create_browser_context(CreateBrowserContextParams::default())
+            .await
+            .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+        let tab_params = CreateTargetParams::builder()
+            .url("about:blank")
+            .browser_context_id(ctx_id.clone())
+            .build()
+            .map_err(|e| FlareSolverError::Browser(e))?;
+
+        let page = self
+            .browser
+            .new_page(tab_params)
+            .await
+            .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+        let chaser = ChaserPage::new(page);
+        let result = std::panic::AssertUnwindSafe(self.do_fetch(&chaser, req))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(FlareSolverError::Browser("panic in browser fetch".into())));
+        let _ = chaser.raw_page().clone().close().await;
+        // Destroy the context — this discards all cookies/storage/cache for this request.
+        let _ = self.browser.dispose_browser_context(ctx_id).await;
         result
     }
 
@@ -216,19 +270,42 @@ impl BrowserSession {
             .map_err(|_| FlareSolverError::Timeout(req.timeout_ms))?
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
-        // Drain response events to find the main-document response headers.
-        // Total deadline prevents SPAs that emit continuous sub-resource events
-        // from keeping the loop alive until the outer request timeout.
-        // Drop the stream immediately after — frees buffered events from page load.
+        // Single event-driven loop — no evaluate() polling.
+        //
+        // goto() returns at DOMContentLoaded, which may land on a CF challenge page (403).
+        // We stay in the loop watching Document response events:
+        //   • Non-CF response (200, 404, …) or non-cloudflare server  → stop immediately
+        //   • CF 403 (server: cloudflare)                             → CF is running JS;
+        //     keep reading events until the challenge redirects to the real page
+        //   • 200ms silence after settling + found_document           → page is done
+        //   • Overall deadline (maxTimeout - 2 s)                     → hard stop
+        //
+        // This replaces both the old 500 ms evaluate() poll and the fixed 2 s drain,
+        // eliminating ~N×2 CDP round-trips and reacting instantly to each navigation.
+        let event_deadline = Instant::now()
+            + Duration::from_millis(req.timeout_ms.saturating_sub(2_000).max(5_000));
         let mut headers: HashMap<String, String> = HashMap::new();
         let mut http_status = 200u16;
         let mut found_document = false;
-        let drain_deadline = Instant::now() + Duration::from_millis(2_000);
-        while !found_document && Instant::now() < drain_deadline {
+
+        'events: loop {
+            if Instant::now() >= event_deadline {
+                break;
+            }
             match timeout(Duration::from_millis(200), response_events.next()).await {
                 Ok(Some(ev)) => {
                     if matches!(ev.r#type, ResourceType::Document) {
-                        http_status = ev.response.status as u16;
+                        let status = ev.response.status as u16;
+                        let is_cf = ev.response.headers.inner()
+                            .as_object()
+                            .and_then(|m| m.get("server").or_else(|| m.get("Server")))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.eq_ignore_ascii_case("cloudflare"))
+                            .unwrap_or(false);
+
+                        // Overwrite — always keep the most recent Document response.
+                        http_status = status;
+                        headers.clear();
                         if let Some(obj) = ev.response.headers.inner().as_object() {
                             for (k, v) in obj {
                                 headers.insert(
@@ -238,12 +315,27 @@ impl BrowserSession {
                             }
                         }
                         found_document = true;
+
+                        if status == 403 && is_cf {
+                            // CF challenge page — keep the loop alive waiting for redirect.
+                            continue 'events;
+                        }
+                        // Real page (200/4xx/5xx non-CF, or any non-403) — done.
+                        break 'events;
                     }
+                    // Sub-resource events: consume silently.
                 }
-                _ => break,
+                Ok(None) => break, // CDP stream closed
+                Err(_) => {
+                    // 200 ms with no new event.
+                    if found_document {
+                        break; // quiet period after page settled
+                    }
+                    // No Document yet — keep waiting (e.g. slow first navigation).
+                }
             }
         }
-        drop(response_events); // free buffered sub-resource events immediately
+        drop(response_events);
 
         let html = chaser
             .content()

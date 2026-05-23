@@ -16,7 +16,8 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    let store = Arc::new(SessionStore::new(cfg.headless));
+    let store = Arc::new(SessionStore::new(cfg.headless, cfg.no_sandbox));
+    store.init_ephemeral().await;
     let router = create_router(store);
     let addr = format!("{}:{}", cfg.host, cfg.port);
 

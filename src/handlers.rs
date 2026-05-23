@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, Json};
 
-use crate::browser::{BrowserSession, FetchRequest};
+use crate::browser::FetchRequest;
 use crate::error::{FlareSolverError, Result};
 use crate::models::{Solution, SolveRequest, SolveResponse};
 use crate::session::SessionStore;
@@ -15,6 +15,7 @@ pub async fn solve(
     Json(req): Json<SolveRequest>,
 ) -> std::result::Result<Json<SolveResponse>, FlareSolverError> {
     let start = unix_ms();
+    log_incoming_request(&req);
 
     let (status, message, solution) = match req.cmd.as_str() {
         "request.get"      => handle_fetch(store, req, false).await?,
@@ -40,6 +41,8 @@ async fn handle_fetch(
     req: SolveRequest,
     is_post: bool,
 ) -> Result<(String, String, Option<Solution>)> {
+    let t0 = Instant::now();
+
     let url = req
         .url
         .ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
@@ -65,10 +68,30 @@ async fn handle_fetch(
         let session = arc.lock().await;
         session.fetch(fetch_req).await?
     } else {
-        // Ephemeral browser: create with proxy, use once, then drop.
-        let session = BrowserSession::new(true, proxy_url).await?;
-        session.fetch(fetch_req).await?
+        store.ephemeral_fetch(fetch_req, proxy_url).await?
     };
+
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    let cf_solved = result.cookies.iter().any(|c| c.name == "cf_clearance");
+    let cf_challenge_page = result.status == 403
+        && (result.html.contains("Just a moment") || result.html.contains("cf-please-wait"));
+    // Detect challenge bypass without cf_clearance (e.g. Turnstile mode):
+    // the final URL differs from the requested URL and the page loaded successfully.
+    let cf_bypassed_without_cookie = !cf_solved
+        && !cf_challenge_page
+        && result.status == 200
+        && result.url != url;
+    if cf_solved {
+        tracing::info!("Challenge solved!");
+    } else if cf_challenge_page {
+        tracing::warn!("Challenge detected but not solved! (returned 403 challenge page)");
+    } else if cf_bypassed_without_cookie {
+        tracing::info!("Challenge bypassed (no cf_clearance — likely Turnstile)");
+    } else {
+        tracing::info!("Challenge not detected!");
+    }
+    tracing::info!("Response time: {:.2}s", elapsed);
 
     let solution = Solution {
         url: result.url,
@@ -115,6 +138,19 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn log_incoming_request(req: &SolveRequest) {
+    // Match Python FlareSolverr's log format:
+    // POST /v1 body: {'cmd': '...', 'url': '...', 'maxTimeout': ..., 'session': '...'}
+    let url_part = req.url.as_deref().map(|u| format!(", 'url': '{u}'")).unwrap_or_default();
+    let session_part = req.session.as_deref().map(|s| format!(", 'session': '{s}'")).unwrap_or_default();
+    let proxy_part = req.proxy.as_ref().map(|p| format!(", 'proxy': {{'url': '{}'}}", p.url)).unwrap_or_default();
+    tracing::info!(
+        "Incoming request POST /v1 body: {{'cmd': '{}'{url_part}, 'maxTimeout': {}{session_part}{proxy_part}}}",
+        req.cmd,
+        req.max_timeout,
+    );
 }
 
 #[cfg(test)]

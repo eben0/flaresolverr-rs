@@ -20,6 +20,8 @@ pub struct FlareSolverConfig {
     pub headless: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default)]
+    pub no_sandbox: bool,
 }
 
 fn default_host() -> String { "0.0.0.0".into() }

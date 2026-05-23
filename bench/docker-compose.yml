@@ -19,4 +19,5 @@ services:
     environment:
       - FLARESOLVERR_LOG_LEVEL=info
       - FLARESOLVERR_HEADLESS=true
+      - FLARESOLVERR_NO_SANDBOX=true
     restart: unless-stopped
