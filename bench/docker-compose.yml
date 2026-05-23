@@ -1,0 +1,22 @@
+services:
+  flaresolverr-py:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr-py
+    ports:
+      - "8191:8191"
+    environment:
+      - LOG_LEVEL=info
+      - HEADLESS=true
+    restart: unless-stopped
+
+  flaresolverr-rs:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: flaresolverr-rs
+    ports:
+      - "8192:8191"
+    environment:
+      - FLARESOLVERR_LOG_LEVEL=info
+      - FLARESOLVERR_HEADLESS=true
+    restart: unless-stopped
