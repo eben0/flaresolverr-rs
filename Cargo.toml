@@ -1,6 +1,6 @@
 [package]
 name = "flaresolverr-rs"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Rust port of FlareSolverr — Cloudflare bypass proxy and library using headless Chromium"
 license = "MIT"
@@ -8,7 +8,7 @@ repository = "https://github.com/eben0/flaresolverr-rs"
 keywords = ["cloudflare", "flaresolverr", "bypass", "scraping", "chromium"]
 categories = ["web-programming", "web-programming::http-client"]
 readme = "README.md"
-exclude = ["plan.md"]
+exclude = ["plan.md", "bench/"]
 
 [lib]
 name = "flaresolverr_rs"
