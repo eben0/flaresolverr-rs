@@ -235,7 +235,7 @@ docker run -p 8191:8191 flaresolverr-rs
 Add to your `Cargo.toml`:
 
 ```toml
-flaresolverr-rs = { git = "https://github.com/eben0/flaresolverr-rs" }
+flaresolverr-rs = "0.1"
 ```
 
 Use `BrowserSession` and `FetchRequest` directly — no HTTP round-trip, no serialization overhead:
