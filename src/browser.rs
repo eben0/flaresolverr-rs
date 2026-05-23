@@ -5,6 +5,13 @@ use base64::engine::general_purpose::STANDARD as B64;
 use futures::{FutureExt, StreamExt};
 use tokio::time::{timeout, Duration, Instant};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
+use chaser_oxide::cdp::browser_protocol::fetch::{
+    EnableParams as FetchEnableParams,
+    EventAuthRequired,
+    ContinueWithAuthParams,
+    AuthChallengeResponse,
+    AuthChallengeResponseResponse,
+};
 use chaser_oxide::cdp::browser_protocol::network::{CookieParam, EventResponseReceived, ResourceType};
 use chaser_oxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
 use chaser_oxide::page::ScreenshotParams;
@@ -103,12 +110,37 @@ pub struct PageResult {
     pub screenshot: Option<String>, // base64-encoded PNG
 }
 
+// ── Proxy credential parsing ──────────────────────────────────────────────────
+
+/// Strips `user:pass@` from a proxy URL and returns the credentials separately.
+/// Chrome ignores embedded credentials in `--proxy-server`; they must be
+/// forwarded via CDP `Fetch.authRequired` events instead.
+fn parse_proxy_credentials(url: &str) -> (Option<(String, String)>, String) {
+    let Some(scheme_end) = url.find("://") else {
+        return (None, url.to_string());
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    let Some(at_pos) = after_scheme.find('@') else {
+        return (None, url.to_string());
+    };
+    let creds_str = &after_scheme[..at_pos];
+    let host_part = &after_scheme[at_pos + 1..];
+    let scheme_prefix = &url[..scheme_end + 3];
+    let Some(colon_pos) = creds_str.find(':') else {
+        return (None, url.to_string());
+    };
+    let username = creds_str[..colon_pos].to_string();
+    let password = creds_str[colon_pos + 1..].to_string();
+    (Some((username, password)), format!("{}{}", scheme_prefix, host_part))
+}
+
 // ── BrowserSession ────────────────────────────────────────────────────────────
 
 pub struct BrowserSession {
     browser: Browser,
     profile: ChaserProfile,
     data_dir: PathBuf,
+    proxy_credentials: Option<(String, String)>,
 }
 
 impl Drop for BrowserSession {
@@ -135,15 +167,16 @@ impl BrowserSession {
         if no_sandbox {
             builder = builder.no_sandbox();
         }
-        if let Some(p) = proxy.filter(|s| !s.is_empty()) {
-            // Warn if credentials are embedded: they appear in /proc/<pid>/cmdline
-            // and are visible to all local processes. Chrome ignores embedded auth
-            // in --proxy-server; credentials must be handled via CDP auth events.
-            if p.contains('@') {
-                tracing::warn!("proxy URL contains credentials — they will be visible in the process list and are NOT forwarded by Chrome; use CDP proxy auth instead");
+        let proxy_credentials = if let Some(p) = proxy.filter(|s| !s.is_empty()) {
+            let (creds, clean_url) = parse_proxy_credentials(p);
+            if creds.is_some() {
+                tracing::debug!("proxy credentials extracted; forwarding via CDP auth");
             }
-            builder = builder.arg(format!("--proxy-server={p}"));
-        }
+            builder = builder.arg(format!("--proxy-server={clean_url}"));
+            creds
+        } else {
+            None
+        };
         let config = builder.build().map_err(FlareSolverError::Browser)?;
 
         let (browser, mut handler) = Browser::launch(config)
@@ -158,7 +191,7 @@ impl BrowserSession {
             }
         });
 
-        Ok(Self { browser, profile: ChaserProfile::native().build(), data_dir })
+        Ok(Self { browser, profile: ChaserProfile::native().build(), data_dir, proxy_credentials })
     }
 
     /// Open a tab, run the fetch, then always close the tab — success or error.
@@ -220,6 +253,46 @@ impl BrowserSession {
             .apply_profile(&self.profile)
             .await
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+        // If the proxy requires authentication, enable the CDP Fetch domain so
+        // Chrome pauses auth challenges and we can respond with credentials.
+        // Credentials are stripped from --proxy-server (Chrome ignores them there
+        // and they'd be visible in the process list).
+        if let Some((ref username, ref password)) = self.proxy_credentials {
+            chaser
+                .raw_page()
+                .execute(FetchEnableParams {
+                    patterns: None,
+                    handle_auth_requests: Some(true),
+                })
+                .await
+                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+            let mut auth_events = chaser
+                .raw_page()
+                .event_listener::<EventAuthRequired>()
+                .await
+                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+            let auth_page = chaser.raw_page().clone();
+            let user = username.clone();
+            let pass = password.clone();
+
+            tokio::spawn(async move {
+                while let Some(ev) = auth_events.next().await {
+                    let _ = auth_page
+                        .execute(ContinueWithAuthParams {
+                            request_id: ev.request_id.clone(),
+                            auth_challenge_response: AuthChallengeResponse {
+                                response: AuthChallengeResponseResponse::ProvideCredentials,
+                                username: Some(user.clone()),
+                                password: Some(pass.clone()),
+                            },
+                        })
+                        .await;
+                }
+            });
+        }
 
         // Subscribe to response events BEFORE navigation so we don't miss them.
         let mut response_events = chaser
@@ -454,5 +527,26 @@ mod tests {
         assert!(mapped.session);
         assert!(mapped.expiry.is_none());
         assert!(mapped.http_only);
+    }
+
+    #[test]
+    fn test_parse_proxy_credentials_with_auth() {
+        let (creds, url) = parse_proxy_credentials("http://user:pass@proxy.example.com:8080");
+        assert_eq!(creds, Some(("user".into(), "pass".into())));
+        assert_eq!(url, "http://proxy.example.com:8080");
+    }
+
+    #[test]
+    fn test_parse_proxy_credentials_no_auth() {
+        let (creds, url) = parse_proxy_credentials("http://proxy.example.com:8080");
+        assert!(creds.is_none());
+        assert_eq!(url, "http://proxy.example.com:8080");
+    }
+
+    #[test]
+    fn test_parse_proxy_credentials_socks5() {
+        let (creds, url) = parse_proxy_credentials("socks5://admin:s3cr3t@10.0.0.1:1080");
+        assert_eq!(creds, Some(("admin".into(), "s3cr3t".into())));
+        assert_eq!(url, "socks5://10.0.0.1:1080");
     }
 }
