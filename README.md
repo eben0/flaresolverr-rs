@@ -271,6 +271,55 @@ let result = session.fetch(
 
 `PageResult` fields: `url`, `status`, `headers`, `html`, `cookies`, `user_agent`, `screenshot`.
 
+### Cloudflare bypass strategies
+
+**Single request / rarely visited domain** — create a session, fetch, drop:
+
+```rust
+let session = BrowserSession::new(true, None).await?;
+let result = session.fetch(FetchRequest::get("https://www.bloomberg.com").timeout(60_000)).await?;
+// session drops here, Chrome exits
+```
+
+Cost: full Chrome launch + challenge solve every time (~10–30s). Fine for one-off scrapes.
+
+**Multiple requests to the same domain (recommended)** — reuse the session. After the first fetch solves the challenge, `cf_clearance` lives in Chrome's cookie jar. Subsequent fetches on the same domain skip the challenge and return in ~1–2s:
+
+```rust
+let session = BrowserSession::new(true, None).await?;
+
+// First fetch: pays the Cloudflare challenge cost (~10–30s)
+let r1 = session.fetch(FetchRequest::get("https://www.bloomberg.com/markets").timeout(60_000)).await?;
+
+// Subsequent fetches: ~1–2s, challenge already solved
+let r2 = session.fetch(FetchRequest::get("https://www.bloomberg.com/technology").timeout(30_000)).await?;
+let r3 = session.fetch(FetchRequest::get("https://www.bloomberg.com/opinion").timeout(30_000)).await?;
+```
+
+**Concurrent scraping across multiple domains** — one session per domain, all in parallel:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+let bloomberg = Arc::new(Mutex::new(BrowserSession::new(true, None).await?));
+let ft        = Arc::new(Mutex::new(BrowserSession::new(true, None).await?));
+
+tokio::join!(
+    async { bloomberg.lock().await.fetch(FetchRequest::get("https://www.bloomberg.com/markets").timeout(60_000)).await },
+    async { ft.lock().await.fetch(FetchRequest::get("https://www.ft.com/content/...").timeout(60_000)).await },
+);
+```
+
+The `Mutex` is needed because opening two tabs in the same browser simultaneously can cause CDP message interleaving.
+
+**Key rules:**
+
+- **One session per domain** — `cf_clearance` is domain-scoped; a Bloomberg session's cookies don't help on FT.
+- **Don't share sessions across domains** — you'd be browsing FT with Bloomberg-authenticated Chrome state.
+- **Sessions can go stale** — `cf_clearance` has a TTL (~30 min to a few hours). If you get a 403 or challenge on a reused session, destroy and recreate it.
+- **Proxy + session = fixed pairing** — `cf_clearance` is bound to the IP that solved the challenge. If your proxy rotates IPs, create a new session per IP.
+
 ---
 
 ## Building
