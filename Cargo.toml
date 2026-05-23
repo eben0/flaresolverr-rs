@@ -24,7 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow      = "1"
 futures     = "0.3"
 figment     = { version = "0.10", features = ["toml", "env"] }
-chaser-oxide = { git = "https://github.com/0xchasercat/chaser-oxide" }
+chaser-oxide = "0.2.4"
 base64 = "0.22"
 
 [dev-dependencies]

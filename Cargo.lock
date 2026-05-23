@@ -176,7 +176,8 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "chaser-oxide"
 version = "0.2.4"
-source = "git+https://github.com/0xchasercat/chaser-oxide#0752c9997898167868187bb97ae61b4a1182bdd8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7ca9d80a63819a12f92c5f7ce908af64aeef762540f14219eb2be35475031cf"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -205,7 +206,8 @@ dependencies = [
 [[package]]
 name = "chromiumoxide_cdp"
 version = "0.9.1"
-source = "git+https://github.com/0xchasercat/chaser-oxide#0752c9997898167868187bb97ae61b4a1182bdd8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68a6a03a7ebac4ea85308f285d6959a3e6b2ce32a0c9465dc7a7b1db0144eec7"
 dependencies = [
  "chromiumoxide_pdl",
  "chromiumoxide_types",
@@ -216,7 +218,8 @@ dependencies = [
 [[package]]
 name = "chromiumoxide_pdl"
 version = "0.9.1"
-source = "git+https://github.com/0xchasercat/chaser-oxide#0752c9997898167868187bb97ae61b4a1182bdd8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c602dea92337bc4d824668d78c5b79c3b4ddb29b40dd7218282bbe8fd3fc2091"
 dependencies = [
  "chromiumoxide_types",
  "either",
@@ -231,7 +234,8 @@ dependencies = [
 [[package]]
 name = "chromiumoxide_types"
 version = "0.9.1"
-source = "git+https://github.com/0xchasercat/chaser-oxide#0752c9997898167868187bb97ae61b4a1182bdd8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "678d5146e74f16fc4a41978b275af572cd913de1f10270d2b93b6c276bc57d80"
 dependencies = [
  "serde",
  "serde_json",
