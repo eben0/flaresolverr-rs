@@ -1,4 +1,12 @@
+use figment::{Figment, providers::{Env, Format, Toml}};
 use serde::Deserialize;
+
+pub fn load() -> Result<FlareSolverConfig, figment::Error> {
+    Figment::new()
+        .merge(Toml::file("config.toml"))
+        .merge(Env::prefixed("FLARESOLVERR_"))
+        .extract()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FlareSolverConfig {

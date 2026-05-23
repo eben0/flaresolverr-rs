@@ -1,18 +1,17 @@
 [package]
-name = "flare_solver"
+name = "flaresolverr-rs"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "flare_solver"
+name = "flaresolverr_rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "flare_solver"
+name = "flaresolverr-rs"
 path = "src/main.rs"
 
 [dependencies]
-cain_core   = { git = "ssh://git@gitlab.com/agent-cain/core.git" }
 axum        = "0.7"
 tokio       = { version = "1", features = ["full"] }
 serde       = { version = "1", features = ["derive"] }
@@ -24,7 +23,9 @@ tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow      = "1"
 futures     = "0.3"
+figment     = { version = "0.10", features = ["toml", "env"] }
 chaser-oxide = { git = "https://github.com/0xchasercat/chaser-oxide" }
+base64 = "0.22"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

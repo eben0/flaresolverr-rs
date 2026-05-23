@@ -47,16 +47,19 @@ async fn handle_fetch(
     let cookies = req.cookies.as_deref().unwrap_or_default();
     let post_data = if is_post { req.post_data.as_deref() } else { None };
     let timeout_ms = req.max_timeout;
+    let return_screenshot = req.return_screenshot.unwrap_or(false);
+    let proxy_url = req.proxy.as_ref().map(|p| p.url.as_str());
 
     let result = if let Some(ref session_id) = req.session {
         let arc = store
             .get(session_id)
             .ok_or_else(|| FlareSolverError::SessionNotFound(session_id.clone()))?;
         let session = arc.lock().await;
-        session.fetch(&url, cookies, timeout_ms, post_data).await?
+        session.fetch(&url, cookies, timeout_ms, post_data, return_screenshot).await?
     } else {
-        let session = BrowserSession::new(true).await?;
-        session.fetch(&url, cookies, timeout_ms, post_data).await?
+        // Ephemeral browser: create with proxy, use once, then drop.
+        let session = BrowserSession::new(true, proxy_url).await?;
+        session.fetch(&url, cookies, timeout_ms, post_data, return_screenshot).await?
     };
 
     let solution = Solution {
@@ -66,7 +69,7 @@ async fn handle_fetch(
         response: result.html,
         cookies: result.cookies,
         user_agent: result.user_agent,
-        screenshot: None,
+        screenshot: result.screenshot,
     };
 
     Ok(("ok".into(), String::new(), Some(solution)))
@@ -76,7 +79,8 @@ async fn handle_session_create(
     store: Arc<SessionStore>,
     req: SolveRequest,
 ) -> Result<(String, String, Option<Solution>)> {
-    let id = store.create(req.session).await?;
+    let proxy_url = req.proxy.as_ref().map(|p| p.url.as_str());
+    let id = store.create(req.session, proxy_url).await?;
     Ok(("ok".into(), format!("Session created: {id}"), None))
 }
 

@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use futures::StreamExt;
 use tokio::time::{timeout, Duration};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
-use chaser_oxide::cdp::browser_protocol::network::CookieParam;
+use chaser_oxide::cdp::browser_protocol::network::{CookieParam, EventResponseReceived, ResourceType};
+use chaser_oxide::page::ScreenshotParams;
 
 use crate::error::{FlareSolverError, Result};
 use crate::models::{RequestCookie, ResponseCookie};
@@ -43,6 +46,7 @@ pub struct PageResult {
     pub html: String,
     pub cookies: Vec<ResponseCookie>,
     pub user_agent: String,
+    pub screenshot: Option<String>, // base64-encoded PNG
 }
 
 // ── BrowserSession ────────────────────────────────────────────────────────────
@@ -52,13 +56,17 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
-    pub async fn new(headless: bool) -> Result<Self> {
-        let config = if headless {
-            BrowserConfig::builder().new_headless_mode().build()
+    pub async fn new(headless: bool, proxy: Option<&str>) -> Result<Self> {
+        let mut builder = BrowserConfig::builder();
+        builder = if headless {
+            builder.new_headless_mode()
         } else {
-            BrowserConfig::builder().with_head().build()
+            builder.with_head()
+        };
+        if let Some(p) = proxy.filter(|s| !s.is_empty()) {
+            builder = builder.arg(format!("--proxy-server={p}"));
         }
-        .map_err(|e| FlareSolverError::Browser(e))?;
+        let config = builder.build().map_err(|e| FlareSolverError::Browser(e))?;
 
         let (browser, mut handler) = Browser::launch(config)
             .await
@@ -81,6 +89,7 @@ impl BrowserSession {
         cookies: &[RequestCookie],
         timeout_ms: u64,
         post_data: Option<&str>,
+        return_screenshot: bool,
     ) -> Result<PageResult> {
         let page = self
             .browser
@@ -92,6 +101,13 @@ impl BrowserSession {
         let profile = ChaserProfile::native().build();
         chaser
             .apply_profile(&profile)
+            .await
+            .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+        // Subscribe to response events BEFORE navigation so we don't miss them.
+        let mut response_events = chaser
+            .raw_page()
+            .event_listener::<EventResponseReceived>()
             .await
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
@@ -130,6 +146,31 @@ impl BrowserSession {
             .map_err(|_| FlareSolverError::Timeout(timeout_ms))?
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
+        // Drain response events to find the main-document response headers.
+        // Events fired before goto() returned are already queued in the channel.
+        let mut headers: HashMap<String, String> = HashMap::new();
+        let mut http_status = 200u16;
+        let mut found_document = false;
+        while !found_document {
+            match timeout(Duration::from_millis(200), response_events.next()).await {
+                Ok(Some(ev)) => {
+                    if matches!(ev.r#type, ResourceType::Document) {
+                        http_status = ev.response.status as u16;
+                        if let Some(obj) = ev.response.headers.inner().as_object() {
+                            for (k, v) in obj {
+                                headers.insert(
+                                    k.to_lowercase(),
+                                    v.as_str().unwrap_or("").to_string(),
+                                );
+                            }
+                        }
+                        found_document = true;
+                    }
+                }
+                _ => break, // timeout or stream closed
+            }
+        }
+
         let html = chaser
             .content()
             .await
@@ -141,23 +182,26 @@ impl BrowserSession {
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?
             .unwrap_or_else(|| url.to_string());
 
-        // Use dedicated user_agent() — safe CDP call, no Runtime.enable leak.
+        // Use Navigation Timing for status only as fallback when headers gave us nothing.
+        let status = if http_status != 200 || !found_document {
+            chaser
+                .evaluate(
+                    "window.performance.getEntriesByType('navigation')[0]?.responseStatus || 200",
+                )
+                .await
+                .map_err(|e| FlareSolverError::Browser(e.to_string()))?
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u16)
+                .unwrap_or(http_status)
+        } else {
+            http_status
+        };
+
         let user_agent = chaser
             .raw_page()
             .user_agent()
             .await
             .unwrap_or_else(|_| "Mozilla/5.0".into());
-
-        // responseStatus from Navigation Timing API (Chrome 109+).
-        let status: u16 = chaser
-            .evaluate(
-                "window.performance.getEntriesByType('navigation')[0]?.responseStatus || 200",
-            )
-            .await
-            .map_err(|e| FlareSolverError::Browser(e.to_string()))?
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u16)
-            .unwrap_or(200);
 
         let raw_cookies = chaser
             .raw_page()
@@ -180,13 +224,25 @@ impl BrowserSession {
             })
             .collect();
 
+        let screenshot = if return_screenshot {
+            let png = chaser
+                .raw_page()
+                .screenshot(ScreenshotParams::builder().build())
+                .await
+                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+            Some(B64.encode(&png))
+        } else {
+            None
+        };
+
         Ok(PageResult {
             url: final_url,
             status,
-            headers: HashMap::new(),
+            headers,
             html,
             cookies: mapped_cookies,
             user_agent,
+            screenshot,
         })
     }
 }
@@ -224,7 +280,7 @@ mod tests {
             path: "/".into(),
             secure: false,
             http_only: true,
-            expires: -1.0, // no expiry = session cookie
+            expires: -1.0,
         };
         let mapped = map_cookie(raw);
         assert!(mapped.session);

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use cain_core::config::load;
-use flare_solver::config::FlareSolverConfig;
-use flare_solver::router::create_router;
-use flare_solver::session::SessionStore;
+use flaresolverr_rs::config::{load, FlareSolverConfig};
+use flaresolverr_rs::router::create_router;
+use flaresolverr_rs::session::SessionStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let router = create_router(store);
     let addr = format!("{}:{}", cfg.host, cfg.port);
 
-    tracing::info!("flare_solver starting on {}", addr);
+    tracing::info!("flaresolverr-rs starting on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router).await?;
 
