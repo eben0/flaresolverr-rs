@@ -8,6 +8,7 @@ repository = "https://github.com/eben0/flaresolverr-rs"
 keywords = ["cloudflare", "flaresolverr", "bypass", "scraping", "chromium"]
 categories = ["web-programming", "web-programming::http-client"]
 readme = "README.md"
+exclude = ["plan.md"]
 
 [lib]
 name = "flaresolverr_rs"
