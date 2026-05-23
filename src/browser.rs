@@ -170,7 +170,9 @@ impl BrowserSession {
         let proxy_credentials = if let Some(p) = proxy.filter(|s| !s.is_empty()) {
             let (creds, clean_url) = parse_proxy_credentials(p);
             if creds.is_some() {
-                tracing::debug!("proxy credentials extracted; forwarding via CDP auth");
+                tracing::info!(proxy = %clean_url, "browser launched with proxy (credentials forwarded via CDP auth)");
+            } else {
+                tracing::info!(proxy = %clean_url, "browser launched with proxy");
             }
             builder = builder.arg(format!("--proxy-server={clean_url}"));
             creds
