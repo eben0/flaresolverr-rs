@@ -1,4 +1,4 @@
-# flare_solver
+# flaresolverr-rs
 
 A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — a reverse proxy that bypasses Cloudflare and similar bot-protection challenges using a headless Chromium browser with protocol-level stealth.
 
@@ -6,9 +6,9 @@ Drop-in replacement: existing code that talks to `http://localhost:8191/v1` work
 
 ## How it works
 
-Every request is first attempted via a plain HTTP client (reqwest). If the response is a bot-challenge page (Cloudflare Turnstile/IUAM, DataDome, Imperva), the request is automatically retried through a headless Chromium instance ([chaser-oxide](https://github.com/0xchasercat/chaser-oxide)) that applies protocol-level stealth patches to evade fingerprinting. The browser renders the challenge, solves it, and returns the final HTML along with the bypass cookies.
+Every request is routed through a headless Chromium instance ([chaser-oxide](https://crates.io/crates/chaser-oxide)) that applies protocol-level stealth patches to evade fingerprinting. The browser renders the page, solves any Cloudflare/DataDome/Imperva challenge, and returns the final HTML along with the bypass cookies (`cf_clearance`, etc.) and real HTTP response headers captured via Chrome DevTools Protocol.
 
-Named sessions keep a Chrome instance alive across requests so that `cf_clearance` cookies persist and subsequent requests on the same domain are fast (no re-challenge).
+Named sessions keep a Chrome instance alive across requests so that bypass cookies persist and subsequent requests on the same domain skip the challenge entirely.
 
 ## API
 
@@ -136,7 +136,7 @@ Error (HTTP 500):
 | `url` | string | required for `request.*` | Target URL |
 | `maxTimeout` | number | 60000 | Milliseconds before timeout error |
 | `cookies` | array | `[]` | Injected into browser before navigation |
-| `proxy` | object | none | `{"url": "http://host:port"}`. Set at browser launch — ephemeral browsers use per-request proxy; named sessions use the proxy they were created with |
+| `proxy` | object | none | `{"url": "http://host:port"}`. Ephemeral browsers use per-request proxy; named sessions use the proxy they were created with |
 | `session` | string | none | Named session ID. Omit for an ephemeral browser |
 | `sessionTtlMinutes` | number | — | Parsed but not enforced (sessions persist until `sessions.destroy`) |
 | `returnScreenshot` | bool | false | If true, `solution.screenshot` contains a base64-encoded PNG |
@@ -165,12 +165,6 @@ Environment variable override examples:
 FLARESOLVERR_PORT=9000 FLARESOLVERR_HEADLESS=false cargo run
 ```
 
-Residential proxy for all requests (not per-session):
-
-```bash
-HTTPS_PROXY=http://user:pass@residential-proxy:port cargo run
-```
-
 ---
 
 ## Running
@@ -181,7 +175,7 @@ cargo run
 
 # Release
 cargo build --release
-./target/release/flare_solver
+./target/release/flaresolverr-rs
 ```
 
 Verify it's up:
@@ -227,6 +221,58 @@ curl -s -X POST http://localhost:8191/v1 \
 
 ---
 
+## Docker
+
+```bash
+docker build -t flaresolverr-rs .
+docker run -p 8191:8191 flaresolverr-rs
+```
+
+---
+
+## Use as a library
+
+Add to your `Cargo.toml`:
+
+```toml
+flaresolverr-rs = { git = "https://github.com/eben0/flaresolverr-rs" }
+```
+
+Use `BrowserSession` and `FetchRequest` directly — no HTTP round-trip, no serialization overhead:
+
+```rust
+use flaresolverr_rs::{BrowserSession, FetchRequest};
+
+// Launch a browser (once; reuse for multiple fetches)
+let session = BrowserSession::new(true, None).await?;
+
+// GET
+let result = session.fetch(
+    FetchRequest::get("https://www.bloomberg.com")
+        .timeout(30_000)
+).await?;
+println!("{}", result.html);
+
+// GET with cookies and screenshot
+let result = session.fetch(
+    FetchRequest::get("https://example.com")
+        .cookie("cf_clearance", "abc123")
+        .timeout(60_000)
+        .screenshot()
+).await?;
+println!("status={} screenshot_len={}", result.status, result.screenshot.as_ref().map_or(0, |s| s.len()));
+
+// POST (form-encoded body)
+let result = session.fetch(
+    FetchRequest::post("https://example.com/login", "user=foo&pass=bar")
+        .timeout(30_000)
+).await?;
+```
+
+`PageResult` fields: `url`, `status`, `headers`, `html`, `cookies`, `user_agent`, `screenshot`.
+
+---
+
 ## Building
 
 Requires:
@@ -236,10 +282,7 @@ Requires:
 - OpenSSL development headers (`libssl-dev` on Debian/Ubuntu)
 
 ```bash
-# On Debian/Ubuntu
-sudo apt-get install -y libssl-dev pkg-config
-
-# Build
+sudo apt-get install -y libssl-dev pkg-config chromium
 cargo build
 ```
 
@@ -271,11 +314,11 @@ POST /v1
         ├── handle_fetch()       # request.get / request.post
         │     ├── SessionStore::get()      # named session path
         │     └── BrowserSession::new()   # ephemeral path
-        │           └── BrowserSession::fetch()
+        │           └── BrowserSession::fetch(FetchRequest)
         │                 ├── event_listener::<EventResponseReceived>  # subscribe before navigation
         │                 ├── ChaserPage::apply_profile()             # stealth patches
         │                 ├── set_cookies()                           # inject caller cookies
-        │                 ├── ChaserPage::goto()                      # navigate + wait for load
+        │                 ├── ChaserPage::goto()                      # navigate + solve challenge
         │                 ├── drain response events → headers + status
         │                 ├── ChaserPage::content()                   # HTML
         │                 ├── Page::get_cookies()                     # post-nav cookies
@@ -290,7 +333,7 @@ POST /v1
 | `src/config.rs` | `FlareSolverConfig` with serde defaults |
 | `src/models.rs` | `SolveRequest`, `SolveResponse`, `Solution`, cookie types |
 | `src/error.rs` | `FlareSolverError` enum + axum `IntoResponse` |
-| `src/browser.rs` | `BrowserSession`: chaser-oxide wrapper, header capture, screenshot |
+| `src/browser.rs` | `BrowserSession`, `FetchRequest` builder, `PageResult` |
 | `src/session.rs` | `SessionStore`: DashMap-backed named session CRUD |
 | `src/handlers.rs` | axum handler: JSON dispatch to request/session commands |
 | `src/router.rs` | `create_router()`: axum Router wiring |
