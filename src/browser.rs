@@ -7,7 +7,10 @@ use tokio::time::{timeout, Duration, Instant};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
 use chaser_oxide::cdp::browser_protocol::fetch::{
     EnableParams as FetchEnableParams,
+    RequestPattern,
     EventAuthRequired,
+    EventRequestPaused,
+    ContinueRequestParams,
     ContinueWithAuthParams,
     AuthChallengeResponse,
     AuthChallengeResponseResponse,
@@ -261,15 +264,40 @@ impl BrowserSession {
         // Credentials are stripped from --proxy-server (Chrome ignores them there
         // and they'd be visible in the process list).
         if let Some((ref username, ref password)) = self.proxy_credentials {
+            // Chrome requires a non-empty patterns list when handleAuthRequests=true.
+            // "*" matches all URLs; we immediately continue every requestPaused event
+            // (pass-through) so requests are not stalled. Auth challenges are handled
+            // separately via authRequired events.
             chaser
                 .raw_page()
                 .execute(FetchEnableParams {
-                    patterns: None,
+                    patterns: Some(vec![RequestPattern {
+                        url_pattern: Some("*".to_string()),
+                        resource_type: None,
+                        request_stage: None,
+                    }]),
                     handle_auth_requests: Some(true),
                 })
                 .await
                 .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
+            // Pass-through task: unblock every intercepted request immediately.
+            let mut paused_events = chaser
+                .raw_page()
+                .event_listener::<EventRequestPaused>()
+                .await
+                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
+
+            let pass_page = chaser.raw_page().clone();
+            tokio::spawn(async move {
+                while let Some(ev) = paused_events.next().await {
+                    let _ = pass_page
+                        .execute(ContinueRequestParams::new(ev.request_id.clone()))
+                        .await;
+                }
+            });
+
+            // Auth task: respond to proxy credential challenges.
             let mut auth_events = chaser
                 .raw_page()
                 .event_listener::<EventAuthRequired>()
@@ -282,7 +310,11 @@ impl BrowserSession {
 
             tokio::spawn(async move {
                 while let Some(ev) = auth_events.next().await {
-                    let _ = auth_page
+                    tracing::debug!(
+                        source = ?ev.auth_challenge.source,
+                        "proxy auth challenge received, responding with credentials"
+                    );
+                    let result = auth_page
                         .execute(ContinueWithAuthParams {
                             request_id: ev.request_id.clone(),
                             auth_challenge_response: AuthChallengeResponse {
@@ -292,7 +324,11 @@ impl BrowserSession {
                             },
                         })
                         .await;
+                    if let Err(e) = result {
+                        tracing::warn!("continueWithAuth failed: {e}");
+                    }
                 }
+                tracing::debug!("proxy auth event stream ended");
             });
         }
 

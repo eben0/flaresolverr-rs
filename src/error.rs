@@ -25,6 +25,7 @@ pub enum FlareSolverError {
 
 impl IntoResponse for FlareSolverError {
     fn into_response(self) -> Response {
+        tracing::error!(error = %self, "request failed");
         let body = serde_json::json!({
             "status": "error",
             "message": self.to_string(),

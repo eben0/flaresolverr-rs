@@ -145,7 +145,14 @@ fn log_incoming_request(req: &SolveRequest) {
     // POST /v1 body: {'cmd': '...', 'url': '...', 'maxTimeout': ..., 'session': '...'}
     let url_part = req.url.as_deref().map(|u| format!(", 'url': '{u}'")).unwrap_or_default();
     let session_part = req.session.as_deref().map(|s| format!(", 'session': '{s}'")).unwrap_or_default();
-    let proxy_part = req.proxy.as_ref().map(|p| format!(", 'proxy': {{'url': '{}'}}", p.url)).unwrap_or_default();
+    let proxy_part = req.proxy.as_ref().map(|p| {
+        // Redact credentials (user:pass@) from the log.
+        let display = match (p.url.find("://"), p.url.find('@')) {
+            (Some(s), Some(a)) if a > s => format!("{}://***@{}", &p.url[..s], &p.url[a + 1..]),
+            _ => p.url.clone(),
+        };
+        format!(", 'proxy': {{'url': '{display}'}}")
+    }).unwrap_or_default();
     tracing::info!(
         "Incoming request POST /v1 body: {{'cmd': '{}'{url_part}, 'maxTimeout': {}{session_part}{proxy_part}}}",
         req.cmd,
