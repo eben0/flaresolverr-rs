@@ -5,16 +5,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use futures::{FutureExt, StreamExt};
 use tokio::time::{timeout, Duration, Instant};
 use chaser_oxide::{Browser, BrowserConfig, ChaserPage, ChaserProfile};
-use chaser_oxide::cdp::browser_protocol::fetch::{
-    EnableParams as FetchEnableParams,
-    RequestPattern,
-    EventAuthRequired,
-    EventRequestPaused,
-    ContinueRequestParams,
-    ContinueWithAuthParams,
-    AuthChallengeResponse,
-    AuthChallengeResponseResponse,
-};
+use chaser_oxide::auth::Credentials;
 use chaser_oxide::cdp::browser_protocol::network::{CookieParam, EventResponseReceived, ResourceType};
 use chaser_oxide::cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams};
 use chaser_oxide::page::ScreenshotParams;
@@ -85,11 +76,6 @@ impl FetchRequest {
         self
     }
 
-    pub fn cookie(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.cookies.push(RequestCookie { name: name.into(), value: value.into() });
-        self
-    }
-
     pub fn with_cookies(mut self, cookies: Vec<RequestCookie>) -> Self {
         self.cookies = cookies;
         self
@@ -117,7 +103,7 @@ pub struct PageResult {
 
 /// Strips `user:pass@` from a proxy URL and returns the credentials separately.
 /// Chrome ignores embedded credentials in `--proxy-server`; they must be
-/// forwarded via CDP `Fetch.authRequired` events instead.
+/// supplied via `page.authenticate()` instead.
 fn parse_proxy_credentials(url: &str) -> (Option<(String, String)>, String) {
     let Some(scheme_end) = url.find("://") else {
         return (None, url.to_string());
@@ -177,7 +163,7 @@ impl BrowserSession {
             } else {
                 tracing::info!(proxy = %clean_url, "browser launched with proxy");
             }
-            builder = builder.arg(format!("--proxy-server={clean_url}"));
+            builder = builder.arg(("proxy-server", clean_url.as_str()));
             creds
         } else {
             None
@@ -259,77 +245,16 @@ impl BrowserSession {
             .await
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
-        // If the proxy requires authentication, enable the CDP Fetch domain so
-        // Chrome pauses auth challenges and we can respond with credentials.
-        // Credentials are stripped from --proxy-server (Chrome ignores them there
-        // and they'd be visible in the process list).
+        // Register proxy credentials so the built-in handler responds to 407 challenges.
         if let Some((ref username, ref password)) = self.proxy_credentials {
-            // Chrome requires a non-empty patterns list when handleAuthRequests=true.
-            // "*" matches all URLs; we immediately continue every requestPaused event
-            // (pass-through) so requests are not stalled. Auth challenges are handled
-            // separately via authRequired events.
             chaser
                 .raw_page()
-                .execute(FetchEnableParams {
-                    patterns: Some(vec![RequestPattern {
-                        url_pattern: Some("*".to_string()),
-                        resource_type: None,
-                        request_stage: None,
-                    }]),
-                    handle_auth_requests: Some(true),
+                .authenticate(Credentials {
+                    username: username.clone(),
+                    password: password.clone(),
                 })
                 .await
                 .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
-
-            // Pass-through task: unblock every intercepted request immediately.
-            let mut paused_events = chaser
-                .raw_page()
-                .event_listener::<EventRequestPaused>()
-                .await
-                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
-
-            let pass_page = chaser.raw_page().clone();
-            tokio::spawn(async move {
-                while let Some(ev) = paused_events.next().await {
-                    let _ = pass_page
-                        .execute(ContinueRequestParams::new(ev.request_id.clone()))
-                        .await;
-                }
-            });
-
-            // Auth task: respond to proxy credential challenges.
-            let mut auth_events = chaser
-                .raw_page()
-                .event_listener::<EventAuthRequired>()
-                .await
-                .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
-
-            let auth_page = chaser.raw_page().clone();
-            let user = username.clone();
-            let pass = password.clone();
-
-            tokio::spawn(async move {
-                while let Some(ev) = auth_events.next().await {
-                    tracing::debug!(
-                        source = ?ev.auth_challenge.source,
-                        "proxy auth challenge received, responding with credentials"
-                    );
-                    let result = auth_page
-                        .execute(ContinueWithAuthParams {
-                            request_id: ev.request_id.clone(),
-                            auth_challenge_response: AuthChallengeResponse {
-                                response: AuthChallengeResponseResponse::ProvideCredentials,
-                                username: Some(user.clone()),
-                                password: Some(pass.clone()),
-                            },
-                        })
-                        .await;
-                    if let Err(e) = result {
-                        tracing::warn!("continueWithAuth failed: {e}");
-                    }
-                }
-                tracing::debug!("proxy auth event stream ended");
-            });
         }
 
         // Subscribe to response events BEFORE navigation so we don't miss them.
@@ -381,18 +306,13 @@ impl BrowserSession {
             .map_err(|_| FlareSolverError::Timeout(req.timeout_ms))?
             .map_err(|e| FlareSolverError::Browser(e.to_string()))?;
 
-        // Single event-driven loop — no evaluate() polling.
-        //
+        // Event-driven loop watching Document response events after navigation.
         // goto() returns at DOMContentLoaded, which may land on a CF challenge page (403).
-        // We stay in the loop watching Document response events:
-        //   • Non-CF response (200, 404, …) or non-cloudflare server  → stop immediately
-        //   • CF 403 (server: cloudflare)                             → CF is running JS;
-        //     keep reading events until the challenge redirects to the real page
-        //   • 200ms silence after settling + found_document           → page is done
-        //   • Overall deadline (maxTimeout - 2 s)                     → hard stop
-        //
-        // This replaces both the old 500 ms evaluate() poll and the fixed 2 s drain,
-        // eliminating ~N×2 CDP round-trips and reacting instantly to each navigation.
+        //   • Non-CF response (any status) or non-cloudflare server  → stop immediately
+        //   • CF 403 (server: cloudflare)                            → keep reading;
+        //     the challenge redirects to the real page on success
+        //   • 200ms silence after finding a Document event           → page is done
+        //   • Overall deadline (maxTimeout - 2s)                     → hard stop
         let event_deadline = Instant::now()
             + Duration::from_millis(req.timeout_ms.saturating_sub(2_000).max(5_000));
         let mut headers: HashMap<String, String> = HashMap::new();
