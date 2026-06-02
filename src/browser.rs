@@ -156,6 +156,20 @@ impl BrowserSession {
         if no_sandbox {
             builder = builder.no_sandbox();
         }
+        // Flags matching Python FlareSolverr (src/utils.py)
+        builder = builder
+            .arg(("window-size", "1920,1080"))
+            .arg("--disable-search-engine-choice-screen")
+            .arg("--disable-dev-shm-usage")
+            .arg("--no-zygote")
+            .arg("--ignore-certificate-errors");
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            builder = builder.arg("--disable-gpu-sandbox");
+        }
+        if let Ok(lang) = std::env::var("LANG") {
+            builder = builder.arg(format!("--accept-lang={lang}"));
+        }
         let proxy_credentials = if let Some(p) = proxy.filter(|s| !s.is_empty()) {
             let (creds, clean_url) = parse_proxy_credentials(p);
             if creds.is_some() {
