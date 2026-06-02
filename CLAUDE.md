@@ -6,23 +6,18 @@ A Rust port of FlareSolverr: an HTTP API server that bypasses Cloudflare and sim
 
 ## Build environment
 
-**Build inside WSL** (Ubuntu-24.04). The Windows MSVC linker is not in PATH.
-
 Standard build command:
 
-```bash
-CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flaresolverr-rs \
-~/.cargo/bin/cargo build --manifest-path /mnt/d/git/flaresolverr-rs/Cargo.toml
+```powershell
+cargo build
 ```
 
 Standard test command:
 
-```bash
-CARGO_TARGET_DIR=/home/ubuntu/cargo-targets/flaresolverr-rs \
-~/.cargo/bin/cargo test --manifest-path /mnt/d/git/flaresolverr-rs/Cargo.toml
+```powershell
+cargo test
 ```
 
-- `CARGO_TARGET_DIR` is on the WSL native filesystem to avoid NTFS permission issues and for speed.
 - `flaresolverr-rs` has **no private git dependencies** — all deps are on crates.io or public GitHub. No SSH key required.
 
 ## chaser-oxide
@@ -115,7 +110,6 @@ Unit tests cover:
 - Do not use `raw_page().evaluate()` for JS — it triggers `Runtime.enable` which changes the browser's stealth fingerprint. Use `ChaserPage::evaluate()` instead (isolated world).
 - Do not call `event_listener::<EventResponseReceived>()` after `goto()` — the events fire during navigation, before `goto()` returns. The listener must be set up first.
 - Do not try to change a session's proxy after creation — Chrome does not support live proxy changes. Destroy and recreate the session.
-- Do not run `cargo` via PowerShell — the Windows MSVC linker is missing. Always build in WSL.
 
 ## Known limitations
 
