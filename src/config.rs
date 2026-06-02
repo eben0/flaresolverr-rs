@@ -21,7 +21,7 @@ pub struct FlareSolverConfig {
     pub headless: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    #[serde(default)]
+    #[serde(default = "default_no_sandbox")]
     pub no_sandbox: bool,
 }
 
@@ -30,6 +30,7 @@ fn default_port() -> u16 { 8191 }
 fn default_max_timeout() -> u64 { 60_000 }
 fn default_headless() -> bool { true }
 fn default_log_level() -> String { "info".into() }
+fn default_no_sandbox() -> bool { true }
 
 #[cfg(test)]
 mod tests {
@@ -43,6 +44,7 @@ mod tests {
         assert_eq!(cfg.max_timeout_ms, 60_000);
         assert!(cfg.headless);
         assert_eq!(cfg.log_level, "info");
+        assert!(cfg.no_sandbox);
     }
 
     #[test]
