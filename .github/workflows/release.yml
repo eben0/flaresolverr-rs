@@ -1,26 +1,20 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  release:
-    name: Build & Release
+  build-binary:
+    name: Build binary
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'v')
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -37,12 +31,88 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin flaresolverr-rs
 
-      - name: Prepare binary artifact
-        run: cp target/release/flaresolverr-rs flaresolverr-rs-linux-amd64
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaresolverr-rs-linux-amd64
+          path: target/release/flaresolverr-rs
+          retention-days: 1
+
+  github-release:
+    name: GitHub Release
+    needs: build-binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flaresolverr-rs-linux-amd64
+
+      - name: Rename binary
+        run: mv flaresolverr-rs flaresolverr-rs-linux-amd64 && chmod +x flaresolverr-rs-linux-amd64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.workflow_run.head_branch }}
           files: flaresolverr-rs-linux-amd64
           generate_release_notes: true
+
+  docker:
+    name: Docker
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flaresolverr-rs-linux-amd64
+
+      - name: Prepare binary for build context
+        run: mv flaresolverr-rs flaresolverr-rs-linux-amd64 && chmod +x flaresolverr-rs-linux-amd64
+
+      - name: Extract version from tag
+        id: ver
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "major=${MAJOR}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            BINARY_SOURCE=context
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

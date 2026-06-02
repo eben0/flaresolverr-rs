@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 ARG VERSION
+ARG BINARY_SOURCE=ghcr
 
-FROM debian:trixie-slim AS downloader
+# Path A (default): download binary from GitHub Releases
+FROM debian:trixie-slim AS from-ghcr
 ARG VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
@@ -13,6 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && curl -fL -o /usr/local/bin/flaresolverr-rs "$URL" \
     && chmod +x /usr/local/bin/flaresolverr-rs
 
+# Path B (CI): use pre-built binary from build context (no network needed)
+FROM scratch AS from-context
+COPY flaresolverr-rs-linux-amd64 /usr/local/bin/flaresolverr-rs
+
+# Select binary source via BINARY_SOURCE build-arg (BuildKit skips unused stages)
+FROM from-${BINARY_SOURCE} AS binary-provider
+
 FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 \
@@ -22,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Chrome refuses to run as root; use an unprivileged user.
 RUN useradd -m -u 1000 -s /bin/sh app
-COPY --from=downloader /usr/local/bin/flaresolverr-rs /usr/local/bin/flaresolverr-rs
+COPY --from=binary-provider /usr/local/bin/flaresolverr-rs /usr/local/bin/flaresolverr-rs
 COPY config.toml /app/config.toml
 
 USER app
