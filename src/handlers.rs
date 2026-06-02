@@ -47,7 +47,7 @@ async fn handle_fetch(
         .url
         .ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
 
-    let proxy_url = req.proxy.as_ref().map(|p| p.url.as_str());
+    let proxy_url = req.proxy.as_ref().and_then(|p| p.url.as_deref());
 
     let fetch_req = {
         let base = if is_post {
@@ -110,7 +110,7 @@ async fn handle_session_create(
     store: Arc<SessionStore>,
     req: SolveRequest,
 ) -> Result<(String, String, Option<Solution>)> {
-    let proxy_url = req.proxy.as_ref().map(|p| p.url.as_str());
+    let proxy_url = req.proxy.as_ref().and_then(|p| p.url.as_deref());
     let id = store.create(req.session, proxy_url).await?;
     Ok(("ok".into(), format!("Session created: {id}"), None))
 }
@@ -146,12 +146,17 @@ fn log_incoming_request(req: &SolveRequest) {
     let url_part = req.url.as_deref().map(|u| format!(", 'url': '{u}'")).unwrap_or_default();
     let session_part = req.session.as_deref().map(|s| format!(", 'session': '{s}'")).unwrap_or_default();
     let proxy_part = req.proxy.as_ref().map(|p| {
-        // Redact credentials (user:pass@) from the log.
-        let display = match (p.url.find("://"), p.url.find('@')) {
-            (Some(s), Some(a)) if a > s => format!("{}://***@{}", &p.url[..s], &p.url[a + 1..]),
-            _ => p.url.clone(),
-        };
-        format!(", 'proxy': {{'url': '{display}'}}")
+        let display = p.url.as_deref().map(|u| {
+            // Redact credentials (user:pass@) from the log.
+            match (u.find("://"), u.find('@')) {
+                (Some(s), Some(a)) if a > s => format!("{}://***@{}", &u[..s], &u[a + 1..]),
+                _ => u.to_string(),
+            }
+        });
+        match display {
+            Some(d) => format!(", 'proxy': {{'url': '{d}'}}"),
+            None    => ", 'proxy': {}".to_string(),
+        }
     }).unwrap_or_default();
     tracing::info!(
         "Incoming request POST /v1 body: {{'cmd': '{}'{url_part}, 'maxTimeout': {}{session_part}{proxy_part}}}",

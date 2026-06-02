@@ -29,7 +29,7 @@ pub struct RequestCookie {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProxyConfig {
-    pub url: String,
+    pub url: Option<String>,
 }
 
 // ── Outbound ──────────────────────────────────────────────────────────────────
@@ -115,6 +115,14 @@ mod tests {
     fn test_deserialize_with_proxy() {
         let json = r#"{"cmd":"request.get","url":"https://example.com","proxy":{"url":"http://p:8080"}}"#;
         let req: SolveRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.proxy.unwrap().url, "http://p:8080");
+        assert_eq!(req.proxy.unwrap().url.as_deref(), Some("http://p:8080"));
+    }
+
+    #[test]
+    fn test_deserialize_proxy_without_url() {
+        // Prowlarr sends {"proxy":{}} when testing the connection — must not fail.
+        let json = r#"{"cmd":"sessions.create","proxy":{}}"#;
+        let req: SolveRequest = serde_json::from_str(json).unwrap();
+        assert!(req.proxy.unwrap().url.is_none());
     }
 }
