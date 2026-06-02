@@ -1,6 +1,6 @@
 [package]
 name = "flaresolverr-rs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Rust port of FlareSolverr — Cloudflare bypass proxy and library using headless Chromium"
 license = "MIT"
