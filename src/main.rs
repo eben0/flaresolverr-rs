@@ -7,21 +7,21 @@ use flaresolverr_rs::session::SessionStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cfg = load().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (solver_cfg, server_cfg) = load().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
+            tracing_subscriber::EnvFilter::try_new(&server_cfg.log_level)
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .json()
         .init();
 
     tracing::info!("initializing chaser-cf browser engine");
-    let chaser = Arc::new(ChaserCF::new(cfg.to_chaser_config()).await?);
+    let chaser = Arc::new(ChaserCF::new(solver_cfg.to_chaser_config()).await?);
     let store = Arc::new(SessionStore::new(chaser));
     let router = create_router(store);
-    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let addr = format!("{}:{}", server_cfg.host, server_cfg.port);
 
     tracing::info!("flaresolverr-rs listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
