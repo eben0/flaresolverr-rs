@@ -3,12 +3,14 @@
 Benchmark flaresolverr-rs vs flaresolverr-py against Prowlarr v11 definitions.
 
 Usage:
-    python bench/bench.py [--rs-url URL] [--py-url URL] [--limit N] [--timeout S]
+    python bench/bench.py [--rs-url URL] [--py-url URL] [--limit N] [--timeout S] [--runs N]
+
+With --runs N the benchmark executes N full passes and reports averaged latency,
+pass rate, and CF clearance counts alongside per-run breakdowns.
 
 Outputs a Markdown report to bench/report-YYYYMMDD-HHMMSS.md
 """
 import argparse
-import json
 import subprocess
 import sys
 import time
@@ -47,7 +49,7 @@ def get_first_link(download_url: str) -> str | None:
         doc = yaml.safe_load(resp.text)
         links = doc.get("links") or []
         return links[0] if links else None
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -58,15 +60,13 @@ def solve(base_url: str, target_url: str, timeout_ms: int) -> dict:
         resp = requests.post(f"{base_url}/v1", json=payload, timeout=timeout_ms / 1000 + 10)
         elapsed = int((time.monotonic() - t0) * 1000)
         data = resp.json()
-        status = data.get("status", "error")
         solution = data.get("solution") or {}
         cookies = solution.get("cookies") or []
         has_clearance = any(c.get("name") == "cf_clearance" for c in cookies)
-        http_status = solution.get("status", 0)
         return {
-            "ok": status == "ok",
+            "ok": data.get("status") == "ok",
             "elapsed_ms": elapsed,
-            "http_status": http_status,
+            "http_status": solution.get("status", 0),
             "has_clearance": has_clearance,
             "message": data.get("message", ""),
         }
@@ -78,8 +78,7 @@ def solve(base_url: str, target_url: str, timeout_ms: int) -> dict:
 def check_alive(url: str, label: str) -> bool:
     try:
         resp = requests.get(f"{url}/health", timeout=5)
-        data = resp.json()
-        if data.get("status") == "ok":
+        if resp.json().get("status") == "ok":
             print(f"  {label} ({url}): UP")
             return True
     except Exception:
@@ -88,74 +87,177 @@ def check_alive(url: str, label: str) -> bool:
     return False
 
 
-def fmt_ms(ms: int) -> str:
+def fmt_ms(ms: float) -> str:
+    ms = int(ms)
     return f"{ms:,}ms" if ms < 1000 else f"{ms/1000:.1f}s"
 
 
-def build_report(results: list[dict], rs_url: str, py_url: str, rs_alive: bool, py_alive: bool) -> str:
+def run_once(definitions: list[dict], rs_url: str, py_url: str,
+             rs_alive: bool, py_alive: bool, timeout_ms: int,
+             run_num: int, total_runs: int) -> list[dict]:
+    """Execute one full pass over all definitions. Returns per-indexer result rows."""
+    results = []
+    prefix = f"[run {run_num}/{total_runs}]" if total_runs > 1 else ""
+    for i, entry in enumerate(definitions, 1):
+        name = entry["name"].removesuffix(".yml")
+        print(f"{prefix}[{i}/{len(definitions)}] {name}")
+        url = get_first_link(entry["download_url"]) if entry.get("download_url") else None
+        if not url:
+            print(f"  SKIP: no URL found")
+            results.append({"name": name, "url": None})
+            continue
+        print(f"  URL: {url}")
+        row: dict = {"name": name, "url": url}
+        if rs_alive:
+            r = solve(rs_url, url, timeout_ms)
+            row["rs"] = r
+            print(f"  rs: {'OK' if r['ok'] else 'FAIL'} {fmt_ms(r['elapsed_ms'])}{'  [cf_clearance]' if r['has_clearance'] else ''}")
+        if py_alive:
+            r = solve(py_url, url, timeout_ms)
+            row["py"] = r
+            print(f"  py: {'OK' if r['ok'] else 'FAIL'} {fmt_ms(r['elapsed_ms'])}{'  [cf_clearance]' if r['has_clearance'] else ''}")
+        results.append(row)
+    return results
+
+
+def aggregate_runs(all_runs: list[list[dict]], keys: list[str]) -> list[dict]:
+    """Average per-indexer metrics across runs for each service key."""
+    if not all_runs:
+        return []
+    # Index run results by indexer name
+    by_name: dict[str, list[dict]] = {}
+    for run in all_runs:
+        for row in run:
+            by_name.setdefault(row["name"], []).append(row)
+
+    aggregated = []
+    for name, rows in by_name.items():
+        agg: dict = {"name": name, "url": rows[0].get("url")}
+        for key in keys:
+            keyed = [r[key] for r in rows if key in r]
+            if not keyed:
+                continue
+            ok_count = sum(1 for r in keyed if r["ok"])
+            clearance_count = sum(1 for r in keyed if r["has_clearance"])
+            ok_times = [r["elapsed_ms"] for r in keyed if r["ok"]]
+            agg[key] = {
+                "ok": ok_count > len(keyed) // 2,        # majority pass = pass
+                "ok_rate": ok_count / len(keyed),
+                "elapsed_ms": int(sum(ok_times) / len(ok_times)) if ok_times else 0,
+                "has_clearance": clearance_count > 0,
+                "n_ok": ok_count,
+                "n": len(keyed),
+            }
+        aggregated.append(agg)
+    return aggregated
+
+
+def summary_stats(rows: list[dict], key: str) -> dict:
+    keyed = [r[key] for r in rows if key in r]
+    ok_rows = [r for r in keyed if r["ok"]]
+    times = [r["elapsed_ms"] for r in ok_rows]
+    sorted_t = sorted(times)
+    return {
+        "passed": len(ok_rows),
+        "total": len(keyed),
+        "clearance": sum(1 for r in ok_rows if r["has_clearance"]),
+        "avg_ms": int(sum(times) / len(times)) if times else 0,
+        "p50": sorted_t[len(sorted_t) // 2] if sorted_t else 0,
+        "p95": sorted_t[int(len(sorted_t) * 0.95)] if sorted_t else 0,
+    }
+
+
+def build_report(
+    agg_results: list[dict],
+    all_runs: list[list[dict]],
+    rs_url: str, py_url: str,
+    rs_alive: bool, py_alive: bool,
+    num_runs: int,
+) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
-        f"# FlareSolverr Benchmark Report",
-        f"",
+        "# FlareSolverr Benchmark Report",
+        "",
         f"**Date:** {now}  ",
         f"**flaresolverr-rs:** {rs_url}  ",
         f"**flaresolverr-py:** {py_url}  ",
-        f"**Definitions tested:** {len(results)}",
-        f"",
+        f"**Definitions tested:** {len(agg_results)}  ",
+        f"**Runs:** {num_runs}",
+        "",
     ]
 
-    for label, key, alive in [("flaresolverr-rs", "rs", rs_alive), ("flaresolverr-py", "py", py_alive)]:
-        if not alive:
-            lines += [f"## {label}", "", "_Service was not available during benchmark._", ""]
-            continue
+    if num_runs > 1:
+        lines += ["_Latency figures are averaged across all runs. Pass/fail = majority vote._", ""]
 
-        rows = [r[key] for r in results if key in r]
-        ok_rows = [r for r in rows if r["ok"]]
-        fail_rows = [r for r in rows if not r["ok"]]
-        clearance_rows = [r for r in ok_rows if r["has_clearance"]]
-        times = [r["elapsed_ms"] for r in ok_rows]
-        avg_ms = int(sum(times) / len(times)) if times else 0
-        p50 = sorted(times)[len(times) // 2] if times else 0
-        p95 = sorted(times)[int(len(times) * 0.95)] if times else 0
+    alive_keys = []
+    if rs_alive:
+        alive_keys.append(("flaresolverr-rs", "rs"))
+    if py_alive:
+        alive_keys.append(("flaresolverr-py", "py"))
 
+    for label, key in alive_keys:
+        s = summary_stats(agg_results, key)
         lines += [
             f"## {label}",
-            f"",
+            "",
             f"| Metric | Value |",
             f"|--------|-------|",
-            f"| Passed | {len(ok_rows)} / {len(rows)} |",
-            f"| Failed | {len(fail_rows)} |",
-            f"| CF clearance obtained | {len(clearance_rows)} |",
-            f"| Avg latency (success) | {fmt_ms(avg_ms)} |",
-            f"| p50 latency | {fmt_ms(p50)} |",
-            f"| p95 latency | {fmt_ms(p95)} |",
-            f"",
+            f"| Passed | {s['passed']} / {s['total']} ({s['passed']*100//s['total'] if s['total'] else 0}%) |",
+            f"| CF clearance obtained | {s['clearance']} |",
+            f"| Avg latency (success) | {fmt_ms(s['avg_ms'])} |",
+            f"| p50 latency | {fmt_ms(s['p50'])} |",
+            f"| p95 latency | {fmt_ms(s['p95'])} |",
+            "",
         ]
 
-    # Per-indexer table
-    lines += ["## Per-Indexer Results", ""]
-    headers = ["Indexer", "URL"]
-    if rs_alive:
-        headers += ["RS Status", "RS Time", "RS CF"]
-    if py_alive:
-        headers += ["PY Status", "PY Time", "PY CF"]
-    lines.append("| " + " | ".join(headers) + " |")
-    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    # Per-run summary table (only when multi-run)
+    if num_runs > 1:
+        lines += ["## Per-Run Summary", ""]
+        run_headers = ["Run"]
+        if rs_alive:
+            run_headers += ["RS Passed", "RS Avg"]
+        if py_alive:
+            run_headers += ["PY Passed", "PY Avg"]
+        lines.append("| " + " | ".join(run_headers) + " |")
+        lines.append("| " + " | ".join(["---"] * len(run_headers)) + " |")
+        for idx, run in enumerate(all_runs, 1):
+            row = [str(idx)]
+            if rs_alive:
+                ok = [r["rs"] for r in run if "rs" in r and r["rs"]["ok"]]
+                total = sum(1 for r in run if "rs" in r)
+                avg = int(sum(r["elapsed_ms"] for r in ok) / len(ok)) if ok else 0
+                row += [f"{len(ok)}/{total}", fmt_ms(avg)]
+            if py_alive:
+                ok = [r["py"] for r in run if "py" in r and r["py"]["ok"]]
+                total = sum(1 for r in run if "py" in r)
+                avg = int(sum(r["elapsed_ms"] for r in ok) / len(ok)) if ok else 0
+                row += [f"{len(ok)}/{total}", fmt_ms(avg)]
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
 
-    for r in results:
+    # Per-indexer averaged table
+    lines += ["## Per-Indexer Results", ""]
+    col_headers = ["Indexer", "URL"]
+    if rs_alive:
+        col_headers += ["RS Status", "RS Avg Time", "RS CF"]
+    if py_alive:
+        col_headers += ["PY Status", "PY Avg Time", "PY CF"]
+    lines.append("| " + " | ".join(col_headers) + " |")
+    lines.append("| " + " | ".join(["---"] * len(col_headers)) + " |")
+
+    for r in agg_results:
         row = [r["name"], f"[link]({r['url']})" if r.get("url") else "N/A"]
-        if rs_alive and "rs" in r:
-            d = r["rs"]
+        for key in (["rs"] if rs_alive else []) + (["py"] if py_alive else []):
+            if key not in r:
+                row += ["—", "—", "—"]
+                continue
+            d = r[key]
+            ok_str = "✅" if d["ok"] else "❌"
+            if num_runs > 1 and d["n"] > 1:
+                ok_str += f" ({d['n_ok']}/{d['n']})"
             row += [
-                "✅" if d["ok"] else "❌",
-                fmt_ms(d["elapsed_ms"]),
-                "🍪" if d["has_clearance"] else ("—" if d["ok"] else "✗"),
-            ]
-        if py_alive and "py" in r:
-            d = r["py"]
-            row += [
-                "✅" if d["ok"] else "❌",
-                fmt_ms(d["elapsed_ms"]),
+                ok_str,
+                fmt_ms(d["elapsed_ms"]) if d["elapsed_ms"] else "—",
                 "🍪" if d["has_clearance"] else ("—" if d["ok"] else "✗"),
             ]
         lines.append("| " + " | ".join(row) + " |")
@@ -166,10 +268,11 @@ def build_report(results: list[dict], rs_url: str, py_url: str, rs_alive: bool, 
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark flaresolverr-rs vs flaresolverr-py")
-    parser.add_argument("--rs-url", default="http://localhost:8191", help="flaresolverr-rs base URL")
-    parser.add_argument("--py-url", default="http://localhost:8192", help="flaresolverr-py base URL")
+    parser.add_argument("--rs-url", default="http://localhost:8191")
+    parser.add_argument("--py-url", default="http://localhost:8192")
     parser.add_argument("--limit", type=int, default=20, help="Max definitions to test (0=all)")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout per request in seconds")
+    parser.add_argument("--runs", type=int, default=1, help="Number of benchmark passes to average")
     args = parser.parse_args()
 
     timeout_ms = args.timeout * 1000
@@ -177,48 +280,27 @@ def main():
     print("Checking services...")
     rs_alive = check_alive(args.rs_url, "flaresolverr-rs")
     py_alive = check_alive(args.py_url, "flaresolverr-py")
-
     if not rs_alive and not py_alive:
-        print("ERROR: Both services are down. Exiting.")
+        print("ERROR: Both services are down.")
         sys.exit(1)
 
     definitions = fetch_definitions(args.limit)
-    results = []
+    alive_keys = (["rs"] if rs_alive else []) + (["py"] if py_alive else [])
 
-    for i, entry in enumerate(definitions, 1):
-        name = entry["name"].removesuffix(".yml")
-        download_url = entry.get("download_url")
-        print(f"[{i}/{len(definitions)}] {name}")
+    all_runs: list[list[dict]] = []
+    for run_num in range(1, args.runs + 1):
+        if args.runs > 1:
+            print(f"\n{'='*60}")
+            print(f"  RUN {run_num} / {args.runs}")
+            print(f"{'='*60}")
+        run_results = run_once(
+            definitions, args.rs_url, args.py_url,
+            rs_alive, py_alive, timeout_ms, run_num, args.runs,
+        )
+        all_runs.append(run_results)
 
-        url = None
-        if download_url:
-            url = get_first_link(download_url)
-
-        if not url:
-            print(f"  SKIP: no URL found")
-            results.append({"name": name, "url": None})
-            continue
-
-        print(f"  URL: {url}")
-        row = {"name": name, "url": url}
-
-        if rs_alive:
-            r = solve(args.rs_url, url, timeout_ms)
-            row["rs"] = r
-            status = "OK" if r["ok"] else "FAIL"
-            cf = " [cf_clearance]" if r["has_clearance"] else ""
-            print(f"  rs: {status} {fmt_ms(r['elapsed_ms'])}{cf}")
-
-        if py_alive:
-            r = solve(args.py_url, url, timeout_ms)
-            row["py"] = r
-            status = "OK" if r["ok"] else "FAIL"
-            cf = " [cf_clearance]" if r["has_clearance"] else ""
-            print(f"  py: {status} {fmt_ms(r['elapsed_ms'])}{cf}")
-
-        results.append(row)
-
-    report = build_report(results, args.rs_url, args.py_url, rs_alive, py_alive)
+    agg = aggregate_runs(all_runs, alive_keys)
+    report = build_report(agg, all_runs, args.rs_url, args.py_url, rs_alive, py_alive, args.runs)
 
     bench_dir = Path(__file__).parent
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
