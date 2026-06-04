@@ -281,6 +281,7 @@ pub async fn fetch(
 }
 
 /// Dispatch a FlareSolverr command.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     store: &Arc<SessionStore>,
     cmd: &str,

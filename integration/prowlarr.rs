@@ -101,7 +101,7 @@ async fn test_prowlarr_no_proxy() {
 #[tokio::test]
 #[ignore]
 async fn test_prowlarr_with_proxy() {
-    dotenv::from_filename(".env.proxy").ok();
+    dotenvy::from_filename(".env.proxy").ok();
     let proxy_url = std::env::var("HTTPS_PROXY").expect("HTTPS_PROXY not set in .env.proxy");
     eprintln!("Using proxy: {proxy_url}");
     let base = start_test_server().await;
