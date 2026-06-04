@@ -1,7 +1,7 @@
 host            = "0.0.0.0"
 port            = 8191
 log_level       = "info"
-headless        = true
+headless        = false
 virtual_display = false
 max_timeout_ms  = 120000
 context_limit   = 20

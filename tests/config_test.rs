@@ -15,7 +15,7 @@ fn test_defaults() {
 #[test]
 fn test_override() {
     let cfg: FlareSolverConfig =
-        serde_json::from_str(r#"{"port":9000,"headless":false,"contextLimit":5}"#).unwrap();
+        serde_json::from_str(r#"{"port":9000,"headless":false,"context_limit":5}"#).unwrap();
     assert_eq!(cfg.port, 9000);
     assert!(!cfg.headless);
     assert_eq!(cfg.context_limit, 5);

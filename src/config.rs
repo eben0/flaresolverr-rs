@@ -16,7 +16,6 @@ pub fn load() -> Result<FlareSolverConfig, Box<figment::Error>> {
 
 /// Top-level FlareSolverr configuration.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct FlareSolverConfig {
     #[serde(default = "default_host")]
     pub host: String,
