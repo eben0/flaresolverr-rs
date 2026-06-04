@@ -3,5 +3,5 @@ port            = 8191
 log_level       = "info"
 headless        = true
 virtual_display = false
-max_timeout_ms  = 60000
+max_timeout_ms  = 120000
 context_limit   = 20
