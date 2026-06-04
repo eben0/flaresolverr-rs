@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 use flaresolverr_rs::models::{SolveRequest, SolveResponse};
 
 #[test]
