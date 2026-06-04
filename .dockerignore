@@ -1,0 +1,8 @@
+target/
+.git/
+.idea/
+.agents/
+.cargo-token
+skills-lock.json
+PLAN.md
+.env*

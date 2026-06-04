@@ -1,0 +1,6 @@
+services:
+  flaresolverr-rs:
+    build: .
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
