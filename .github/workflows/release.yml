@@ -70,14 +70,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download binary artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: flaresolverr-rs-linux-amd64
-
-      - name: Prepare binary for build context
-        run: mv flaresolverr-rs flaresolverr-rs-linux-amd64 && chmod +x flaresolverr-rs-linux-amd64
-
       - name: Extract version from tag
         id: ver
         run: |
@@ -113,6 +105,5 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
-            BINARY_SOURCE=context
           cache-from: type=gha
           cache-to: type=gha,mode=max

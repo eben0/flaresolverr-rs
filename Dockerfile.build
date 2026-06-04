@@ -1,9 +1,21 @@
-ARG VERSION=latest
+# ── Build ──────────────────────────────────────────────────────────────────────
+FROM rust:1.87-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Cache dependency downloads before copying full source
+COPY Cargo.toml Cargo.lock ./
+RUN cargo fetch
+
+COPY . .
+RUN cargo build --release --bin flaresolverr-rs
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
-
-ARG VERSION
+FROM debian:bookworm-slim AS runtime
 
 # Chrome shared-library deps + Xvfb for virtual display
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,16 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Download pre-built binary from GitHub releases
-RUN if [ "$VERSION" = "latest" ]; then \
-        URL="https://github.com/eben0/flaresolverr-rs/releases/latest/download/flaresolverr-rs-linux-amd64"; \
-    else \
-        URL="https://github.com/eben0/flaresolverr-rs/releases/download/v${VERSION}/flaresolverr-rs-linux-amd64"; \
-    fi \
-    && wget -qO flaresolverr-rs "$URL" \
-    && chmod +x flaresolverr-rs
-
+COPY --from=builder /build/target/release/flaresolverr-rs ./
 COPY config.toml ./
 
 # On Linux, headed Chrome via Xvfb is the reliable CF-bypass path.
