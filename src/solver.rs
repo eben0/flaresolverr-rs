@@ -7,11 +7,19 @@ use crate::error::{FlareSolverError, Result};
 use crate::models::{RequestCookie, ResponseCookie, Solution};
 use crate::session::SessionStore;
 
+fn redact_url(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(s), Some(a)) if a > s + 3 => format!("{}://***@{}", &url[..s], &url[a + 1..]),
+        _ => url.to_string(),
+    }
+}
+
 /// Parse "scheme://[user:pass@]host:port" into a chaser_cf ProxyConfig.
 pub fn parse_proxy_url(url: &str) -> Result<ProxyConfig> {
+    let safe = redact_url(url);
     let (scheme, rest) = url
         .split_once("://")
-        .ok_or_else(|| FlareSolverError::Browser(format!("invalid proxy URL: {url}")))?;
+        .ok_or_else(|| FlareSolverError::Browser(format!("invalid proxy URL: {safe}")))?;
 
     let (creds, hostport) = if let Some(at) = rest.rfind('@') {
         (Some(&rest[..at]), &rest[at + 1..])
@@ -21,10 +29,10 @@ pub fn parse_proxy_url(url: &str) -> Result<ProxyConfig> {
 
     let (host, port_str) = hostport
         .rsplit_once(':')
-        .ok_or_else(|| FlareSolverError::Browser(format!("proxy URL missing port: {url}")))?;
+        .ok_or_else(|| FlareSolverError::Browser(format!("proxy URL missing port: {safe}")))?;
     let port = port_str
         .parse::<u16>()
-        .map_err(|_| FlareSolverError::Browser(format!("invalid proxy port: {port_str}")))?;
+        .map_err(|_| FlareSolverError::Browser(format!("invalid proxy port in: {safe}")))?;
 
     let mut cfg = ProxyConfig::new(host, port).with_scheme(scheme);
     if let Some(creds) = creds {
@@ -52,29 +60,6 @@ pub fn chaser_cookie_to_response(c: Cookie) -> ResponseCookie {
     }
 }
 
-/// Return true if response headers / body indicate a Cloudflare challenge page.
-fn is_cf_challenge(status: u16, headers: &HashMap<String, String>, body: &str) -> bool {
-    // CF managed challenge: server returns 403 with cf-mitigated header
-    if status == 403 && headers.get("cf-mitigated").map(|v| v.as_str()) == Some("challenge") {
-        return true;
-    }
-    // JS challenge or browser check page: 503 or 403 with CF markers in body
-    if matches!(status, 403 | 503) {
-        let cf_markers = [
-            "cf-browser-verification",
-            "cf_chl_opt",
-            "jschl_vc",
-            "cf-please-wait",
-            "Checking your browser",
-            "__cf_bm",
-        ];
-        if cf_markers.iter().any(|m| body.contains(m)) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Build a reqwest client with optional proxy.
 fn build_client(
     user_agent: &str,
@@ -93,7 +78,33 @@ pub const DEFAULT_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-/// GET or POST: try direct reqwest first; fall back to Chrome WAF bypass if CF challenge detected.
+/// Return true if response headers / body indicate a Cloudflare challenge page.
+fn is_cf_challenge(status: u16, headers: &HashMap<String, String>, body: &str) -> bool {
+    if status == 403 && headers.get("cf-mitigated").map(|v| v.as_str()) == Some("challenge") {
+        return true;
+    }
+    if matches!(status, 403 | 503) {
+        let cf_markers = [
+            "cf-browser-verification",
+            "cf_chl_opt",
+            "jschl_vc",
+            "cf-please-wait",
+            "Checking your browser",
+            "__cf_bm",
+        ];
+        if cf_markers.iter().any(|m| body.contains(m)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// GET or POST: try direct reqwest first; fall back to Chrome WAF bypass if CF challenge
+/// detected. Connection errors (e.g. AIA fetching required) fall back to get_source.
+///
+/// Note: chaser-cf's get_source / solve_waf_session both call wait_for_clearance which
+/// polls for 30 s on non-CF sites. They must only be invoked when CF is detected or
+/// when reqwest cannot connect at all.
 pub async fn fetch(
     chaser: &ChaserCF,
     shared_client: &reqwest::Client,
@@ -103,7 +114,6 @@ pub async fn fetch(
     proxy_url: Option<&str>,
     extra_cookies: &[RequestCookie],
 ) -> Result<Solution> {
-
     let extra_cookie_header: String = extra_cookies
         .iter()
         .map(|c| format!("{}={}", c.name, c.value))
@@ -111,8 +121,6 @@ pub async fn fetch(
         .join("; ");
 
     // ── Pass 1: direct request (fast path for non-CF URLs) ──────────────────
-    // Reuse the shared client for no-proxy requests (connection pooling + TLS session reuse).
-    // Build a fresh client only when a proxy is configured.
     let owned_client;
     let client: &reqwest::Client = if proxy_url.filter(|p| !p.is_empty()).is_some() {
         owned_client = build_client(DEFAULT_UA, proxy_url)?;
@@ -135,7 +143,7 @@ pub async fn fetch(
     };
 
     enum Pass1Result {
-        Clean(u16, HashMap<String, String>, String, String), // status, headers, final_url, body
+        Clean(u16, HashMap<String, String>, String, String),
         CfChallenge,
         ConnectionError,
     }
@@ -171,7 +179,6 @@ pub async fn fetch(
 
     match pass1 {
         Pass1Result::Clean(status, headers, final_url, body) => {
-            // Non-CF response — return immediately without touching Chrome.
             return Ok(Solution {
                 url: final_url,
                 status,
@@ -183,8 +190,8 @@ pub async fn fetch(
             });
         }
         Pass1Result::ConnectionError => {
-            // reqwest can't reach the site (TLS chain issue, old ciphers, etc.).
-            // Chrome handles these cases gracefully — use get_source directly.
+            // reqwest cannot reach the site (TLS chain / AIA fetching / old ciphers).
+            // get_source uses Chrome which handles these natively.
             tracing::info!(url, "connection error on fast path — fetching via browser");
             let chaser_proxy = proxy_url
                 .filter(|p| !p.is_empty())
