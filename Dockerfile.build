@@ -1,23 +1,33 @@
-# ── Build ──────────────────────────────────────────────────────────────────────
-FROM rust:1.87-bookworm AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# ── Chef (installs cargo-chef once, reused by planner + builder) ───────────────
+FROM rust:1.87-bookworm AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /build
 
-# Cache dependency downloads before copying full source
-COPY Cargo.toml Cargo.lock ./
-RUN cargo fetch
+# ── Planner: compute dependency recipe from manifest ──────────────────────────
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
+# ── Builder: cook deps (cached), then build binary ───────────────────────────
+FROM chef AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev lld \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+
+# Cook deps — this layer is cached as long as Cargo.toml/Cargo.lock are unchanged
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build binary — only reruns when src/ or config changes
 COPY . .
 RUN cargo build --release --bin flaresolverr-rs
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-# Chrome shared-library deps + Xvfb for virtual display
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates libssl3 \
         fonts-liberation libnss3 libatk1.0-0 libatk-bridge2.0-0 \
@@ -35,8 +45,6 @@ WORKDIR /app
 COPY --from=builder /build/target/release/flaresolverr-rs ./
 COPY config.toml ./
 
-# On Linux, headed Chrome via Xvfb is the reliable CF-bypass path.
-# Flip virtual_display on and keep headless off so chaser-cf starts Xvfb.
 RUN sed -i 's/^headless\s*=.*/headless        = false/' config.toml \
  && sed -i 's/^virtual_display\s*=.*/virtual_display = true/' config.toml
 
