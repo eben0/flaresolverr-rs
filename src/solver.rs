@@ -52,7 +52,44 @@ pub fn chaser_cookie_to_response(c: Cookie) -> ResponseCookie {
     }
 }
 
-/// GET or POST via chaser-cf: solve WAF, then fetch page with clearance cookies.
+/// Return true if response headers / body indicate a Cloudflare challenge page.
+fn is_cf_challenge(status: u16, headers: &HashMap<String, String>, body: &str) -> bool {
+    // CF managed challenge: server returns 403 with cf-mitigated header
+    if status == 403 && headers.get("cf-mitigated").map(|v| v.as_str()) == Some("challenge") {
+        return true;
+    }
+    // JS challenge or browser check page: 503 or 403 with CF markers in body
+    if matches!(status, 403 | 503) {
+        let cf_markers = [
+            "cf-browser-verification",
+            "cf_chl_opt",
+            "jschl_vc",
+            "cf-please-wait",
+            "Checking your browser",
+            "__cf_bm",
+        ];
+        if cf_markers.iter().any(|m| body.contains(m)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a reqwest client with optional proxy.
+fn build_client(
+    user_agent: &str,
+    proxy_url: Option<&str>,
+) -> std::result::Result<reqwest::Client, FlareSolverError> {
+    let mut builder = reqwest::Client::builder().user_agent(user_agent);
+    if let Some(pu) = proxy_url.filter(|p| !p.is_empty()) {
+        let proxy =
+            reqwest::Proxy::all(pu).map_err(|e| FlareSolverError::Http(e.to_string()))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| FlareSolverError::Http(e.to_string()))
+}
+
+/// GET or POST: try direct reqwest first; fall back to Chrome WAF bypass if CF challenge detected.
 pub async fn fetch(
     chaser: &ChaserCF,
     url: &str,
@@ -61,6 +98,65 @@ pub async fn fetch(
     proxy_url: Option<&str>,
     extra_cookies: &[RequestCookie],
 ) -> Result<Solution> {
+    const DEFAULT_UA: &str =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+    let extra_cookie_header: String = extra_cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    // ── Pass 1: direct request (fast path for non-CF URLs) ──────────────────
+    let client = build_client(DEFAULT_UA, proxy_url)?;
+    let direct_req = if is_post {
+        client
+            .post(url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(post_data.unwrap_or("").to_string())
+    } else {
+        client.get(url)
+    };
+    let direct_req = if extra_cookie_header.is_empty() {
+        direct_req
+    } else {
+        direct_req.header("Cookie", &extra_cookie_header)
+    };
+
+    let direct_resp = direct_req
+        .send()
+        .await
+        .map_err(|e| FlareSolverError::Http(e.to_string()))?;
+
+    let direct_status = direct_resp.status().as_u16();
+    let direct_headers: HashMap<String, String> = direct_resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let direct_final_url = direct_resp.url().to_string();
+    let direct_body = direct_resp
+        .text()
+        .await
+        .map_err(|e| FlareSolverError::Http(e.to_string()))?;
+
+    if !is_cf_challenge(direct_status, &direct_headers, &direct_body) {
+        // Non-CF response — return immediately without touching Chrome.
+        return Ok(Solution {
+            url: direct_final_url,
+            status: direct_status,
+            headers: direct_headers,
+            response: direct_body,
+            cookies: vec![],
+            user_agent: DEFAULT_UA.to_string(),
+            screenshot: None,
+        });
+    }
+
+    tracing::info!(url, "CF challenge detected — engaging browser bypass");
+
+    // ── Pass 2: CF challenge — use chaser-cf browser to get clearance ────────
     let chaser_proxy = proxy_url
         .filter(|p| !p.is_empty())
         .map(parse_proxy_url)
@@ -75,58 +171,40 @@ pub async fn fetch(
         .headers
         .get("user-agent")
         .cloned()
-        .unwrap_or_else(|| "Mozilla/5.0".into());
+        .unwrap_or_else(|| DEFAULT_UA.to_string());
 
     let cookie_header = {
         let waf_str = waf.cookies_string();
-        let extra: Vec<String> = extra_cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect();
-        if extra.is_empty() {
+        if extra_cookie_header.is_empty() {
             waf_str
         } else {
-            format!("{waf_str}; {}", extra.join("; "))
+            format!("{waf_str}; {extra_cookie_header}")
         }
     };
 
-    let mut builder = reqwest::Client::builder().user_agent(&user_agent);
-    if let Some(pu) = proxy_url.filter(|p| !p.is_empty()) {
-        let proxy = reqwest::Proxy::all(pu)
-            .map_err(|e| FlareSolverError::Http(e.to_string()))?;
-        builder = builder.proxy(proxy);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| FlareSolverError::Http(e.to_string()))?;
-
-    let request = if is_post {
-        client
+    let client2 = build_client(&user_agent, proxy_url)?;
+    let request2 = if is_post {
+        client2
             .post(url)
             .header("Cookie", &cookie_header)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(post_data.unwrap_or("").to_string())
     } else {
-        client.get(url).header("Cookie", &cookie_header)
+        client2.get(url).header("Cookie", &cookie_header)
     };
 
-    let response = request
+    let response2 = request2
         .send()
         .await
         .map_err(|e| FlareSolverError::Http(e.to_string()))?;
-    let final_url = response.url().to_string();
-    let status = response.status().as_u16();
-    let headers: HashMap<String, String> = response
+    let final_url = response2.url().to_string();
+    let status = response2.status().as_u16();
+    let headers: HashMap<String, String> = response2
         .headers()
         .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let html = response
+    let html = response2
         .text()
         .await
         .map_err(|e| FlareSolverError::Http(e.to_string()))?;
