@@ -1,10 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use chaser_cf::{ChaserCF, Cookie, ProxyConfig};
 
 use crate::error::{FlareSolverError, Result};
 use crate::models::{FetchResponse, RequestCookie, ResponseCookie};
+
+#[cfg(feature = "server")]
+use std::sync::Arc;
+#[cfg(feature = "server")]
 use crate::session::SessionStore;
 
 /// Parse "scheme://[user:pass@]host:port" into a chaser_cf ProxyConfig.

@@ -1,8 +1,3 @@
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
 use chaser_cf::ChaserError;
 use thiserror::Error;
 
@@ -33,18 +28,28 @@ impl From<ChaserError> for FlareSolverError {
     }
 }
 
-impl IntoResponse for FlareSolverError {
-    fn into_response(self) -> Response {
-        tracing::error!(error = %self, "request failed");
-        let body = serde_json::json!({
-            "status": "error",
-            "message": self.to_string(),
-            "solution": null,
-            "startTimestamp": 0u64,
-            "endTimestamp": 0u64,
-            "version": env!("CARGO_PKG_VERSION"),
-        });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+#[cfg(feature = "server")]
+mod axum_impl {
+    use axum::{
+        http::StatusCode,
+        response::{IntoResponse, Response},
+        Json,
+    };
+    use super::FlareSolverError;
+
+    impl IntoResponse for FlareSolverError {
+        fn into_response(self) -> Response {
+            tracing::error!(error = %self, "request failed");
+            let body = serde_json::json!({
+                "status": "error",
+                "message": self.to_string(),
+                "solution": null,
+                "startTimestamp": 0u64,
+                "endTimestamp": 0u64,
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
     }
 }
 
