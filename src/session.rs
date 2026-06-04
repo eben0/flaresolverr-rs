@@ -65,10 +65,12 @@ impl Default for SessionRegistry {
     }
 }
 
-/// Application-level session store: registry + shared ChaserCF instance.
+/// Application-level session store: registry + shared ChaserCF instance + shared HTTP client.
 pub struct SessionStore {
     pub registry: SessionRegistry,
     pub chaser: Arc<ChaserCF>,
+    /// Shared reqwest client for no-proxy requests — reuses TCP connections and TLS sessions.
+    pub client: reqwest::Client,
 }
 
 impl SessionStore {
@@ -76,6 +78,10 @@ impl SessionStore {
         Self {
             registry: SessionRegistry::new(),
             chaser,
+            client: reqwest::Client::builder()
+                .user_agent(crate::solver::DEFAULT_UA)
+                .build()
+                .expect("failed to build shared HTTP client"),
         }
     }
 }

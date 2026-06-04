@@ -89,18 +89,20 @@ fn build_client(
     builder.build().map_err(|e| FlareSolverError::Http(e.to_string()))
 }
 
+pub const DEFAULT_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 /// GET or POST: try direct reqwest first; fall back to Chrome WAF bypass if CF challenge detected.
 pub async fn fetch(
     chaser: &ChaserCF,
+    shared_client: &reqwest::Client,
     url: &str,
     is_post: bool,
     post_data: Option<&str>,
     proxy_url: Option<&str>,
     extra_cookies: &[RequestCookie],
 ) -> Result<Solution> {
-    const DEFAULT_UA: &str =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-         (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
     let extra_cookie_header: String = extra_cookies
         .iter()
@@ -109,7 +111,15 @@ pub async fn fetch(
         .join("; ");
 
     // ── Pass 1: direct request (fast path for non-CF URLs) ──────────────────
-    let client = build_client(DEFAULT_UA, proxy_url)?;
+    // Reuse the shared client for no-proxy requests (connection pooling + TLS session reuse).
+    // Build a fresh client only when a proxy is configured.
+    let owned_client;
+    let client: &reqwest::Client = if proxy_url.filter(|p| !p.is_empty()).is_some() {
+        owned_client = build_client(DEFAULT_UA, proxy_url)?;
+        &owned_client
+    } else {
+        shared_client
+    };
     let direct_req = if is_post {
         client
             .post(url)
@@ -225,15 +235,22 @@ pub async fn fetch(
         }
     };
 
-    let client2 = build_client(&user_agent, proxy_url)?;
+    let owned_client2;
+    let client2: &reqwest::Client = if proxy_url.filter(|p| !p.is_empty()).is_some() {
+        owned_client2 = build_client(&user_agent, proxy_url)?;
+        &owned_client2
+    } else {
+        shared_client
+    };
     let request2 = if is_post {
         client2
             .post(url)
+            .header("User-Agent", &user_agent)
             .header("Cookie", &cookie_header)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(post_data.unwrap_or("").to_string())
     } else {
-        client2.get(url).header("Cookie", &cookie_header)
+        client2.get(url).header("User-Agent", &user_agent).header("Cookie", &cookie_header)
     };
 
     let response2 = request2
@@ -283,6 +300,7 @@ pub async fn dispatch(
             let effective_proxy = session_proxy.as_deref().or(proxy_url);
             let solution = fetch(
                 &store.chaser,
+                &store.client,
                 url,
                 is_post,
                 post_data,
