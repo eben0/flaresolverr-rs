@@ -29,7 +29,7 @@ tracing       = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow        = "1"
 figment       = { version = "0.10", features = ["toml", "env"] }
-chaser-cf     = "*"
+chaser-cf     = "0.2.1"
 reqwest       = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
