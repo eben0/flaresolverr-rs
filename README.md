@@ -1,6 +1,66 @@
 # flaresolverr-rs
 
-A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — a Cloudflare bypass proxy that implements the same HTTP API, built on [`chaser-cf`](https://crates.io/crates/chaser-cf).
+[![crates.io](https://img.shields.io/crates/v/flaresolverr-rs.svg)](https://crates.io/crates/flaresolverr-rs)
+[![docs.rs](https://docs.rs/flaresolverr-rs/badge.svg)](https://docs.rs/flaresolverr-rs)
+[![CI](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/eben0/flaresolverr-rs/actions/workflows/ci.yml)
+
+A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — Cloudflare bypass as a **library** and **HTTP proxy**, built on [`chaser-cf`](https://crates.io/crates/chaser-cf).
+
+## Library usage
+
+Add to `Cargo.toml` (no axum/server deps):
+
+```toml
+[dependencies]
+flaresolverr-rs = { version = "0.2", default-features = false }
+```
+
+```rust
+use flaresolverr_rs::{FlareSolver, FlareSolverConfig};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let solver = FlareSolver::new(FlareSolverConfig::default()).await?;
+
+    let resp = solver.get("https://example.com").await?;
+    println!("{} — {} bytes", resp.status, resp.body.len());
+    Ok(())
+}
+```
+
+`FlareSolverConfig` fields (all optional, shown with defaults):
+
+```rust
+FlareSolverConfig {
+    headless: true,
+    virtual_display: false,
+    lazy_init: false,
+    max_timeout_ms: 60_000,
+    context_limit: 20,
+    no_sandbox: true,
+}
+```
+
+## Docker (HTTP proxy)
+
+Drop-in replacement for FlareSolverr on port `8191`:
+
+```bash
+docker compose up
+```
+
+Or build the image directly:
+
+```bash
+docker build -f Dockerfile.build -t flaresolverr-rs .
+docker run -p 8191:8191 flaresolverr-rs
+```
+
+```bash
+curl -s http://localhost:8191/v1 \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd":"request.get","url":"https://example.com","maxTimeout":60000}'
+```
 
 ## Performance
 
@@ -12,12 +72,12 @@ A Rust port of [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — 
 | flaresolverr-py | 20/20 (100%) | 3.9s | 12.7s |
 
 - **1.4× faster** average, **3.5× faster** at p95
-- CF-protected sites: rs ~3s (cached clearance) vs py ~12s (re-solves challenge each time)
+- CF-protected sites: rs ~3s (cached clearance) vs py ~12s (re-solves each time)
 - Non-CF sites: rs ~2.4s (reqwest direct) vs py ~1.7s (DOMContentLoaded)
 
-→ See [bench/README.md](bench/README.md) for methodology and detailed per-indexer results.
+→ See [bench/README.md](bench/README.md) for methodology and per-indexer results.
 
-## API Compatibility
+## HTTP API
 
 Drop-in replacement for FlareSolverr. Supports:
 
@@ -29,36 +89,9 @@ Drop-in replacement for FlareSolverr. Supports:
 
 Session management (`sessions.create`, `sessions.list`, `sessions.destroy`) is supported. Sessions store a proxy URL; the CF clearance cache is shared across all sessions via the single `ChaserCF` instance.
 
-### Example
-
-```bash
-curl -s http://localhost:8191/v1 \
-  -H 'Content-Type: application/json' \
-  -d '{"cmd":"request.get","url":"https://example.com","maxTimeout":60000}'
-```
-
-## Running
-
-### Docker (recommended)
-
-```bash
-docker compose up
-```
-
-Runs flaresolverr-rs on port `8191` and flaresolverr-py on `8192` for comparison.
-
-### Local
-
-```bash
-cargo build --release
-./target/release/flaresolverr-rs
-```
-
-Reads `config.toml` from the current directory. Environment variables prefixed `FLARESOLVERR_` override TOML values.
-
 ### Configuration
 
-`config.toml`:
+`config.toml` (also settable via `FLARESOLVERR_*` env vars):
 
 ```toml
 host            = "0.0.0.0"
@@ -75,6 +108,7 @@ context_limit   = 20         # max concurrent Chrome contexts
 - **Two-pass fetch**: reqwest direct for non-CF sites (~2s), Chrome via chaser-cf only when a CF challenge is detected or reqwest cannot connect (TLS/AIA issues).
 - **CF clearance caching**: `cf_clearance` cookies are cached in the shared browser context and reused across requests. CF sites resolve in ~3s after the first solve.
 - **Single Chrome instance**: One `ChaserCF` manages all browser contexts. Concurrent requests share the pool up to `context_limit`.
+- **Feature flags**: `default = ["server"]`. Use `default-features = false` to depend on the library only, without pulling in axum/figment.
 
 ## Tests
 
