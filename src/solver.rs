@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chaser_cf::{ChaserCF, Cookie, ProxyConfig};
 
 use crate::error::{FlareSolverError, Result};
-use crate::models::{RequestCookie, ResponseCookie, Solution};
+use crate::models::{FetchResponse, RequestCookie, ResponseCookie};
 use crate::session::SessionStore;
 
 /// Parse "scheme://[user:pass@]host:port" into a chaser_cf ProxyConfig.
@@ -35,7 +35,7 @@ pub fn parse_proxy_url(url: &str) -> Result<ProxyConfig> {
     Ok(cfg)
 }
 
-/// Convert a chaser_cf Cookie into a FlareSolverr ResponseCookie.
+/// Convert a chaser_cf Cookie into a ResponseCookie.
 pub fn chaser_cookie_to_response(c: Cookie) -> ResponseCookie {
     let is_session = c.expires.is_none();
     ResponseCookie {
@@ -53,14 +53,10 @@ pub fn chaser_cookie_to_response(c: Cookie) -> ResponseCookie {
 }
 
 /// Build a reqwest client with optional proxy.
-fn build_client(
-    user_agent: &str,
-    proxy_url: Option<&str>,
-) -> std::result::Result<reqwest::Client, FlareSolverError> {
+fn build_client(user_agent: &str, proxy_url: Option<&str>) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().user_agent(user_agent);
     if let Some(pu) = proxy_url.filter(|p| !p.is_empty()) {
-        let proxy =
-            reqwest::Proxy::all(pu).map_err(|e| FlareSolverError::Http(e.to_string()))?;
+        let proxy = reqwest::Proxy::all(pu).map_err(|e| FlareSolverError::Http(e.to_string()))?;
         builder = builder.proxy(proxy);
     }
     builder.build().map_err(|e| FlareSolverError::Http(e.to_string()))
@@ -70,7 +66,7 @@ pub const DEFAULT_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-/// Return true if response headers / body indicate a Cloudflare challenge page.
+/// Return true if response headers/body indicate a Cloudflare challenge page.
 fn is_cf_challenge(status: u16, headers: &HashMap<String, String>, body: &str) -> bool {
     if status == 403 && headers.get("cf-mitigated").map(|v| v.as_str()) == Some("challenge") {
         return true;
@@ -92,9 +88,9 @@ fn is_cf_challenge(status: u16, headers: &HashMap<String, String>, body: &str) -
 }
 
 /// GET or POST: try direct reqwest first; fall back to Chrome WAF bypass if CF challenge
-/// detected. Connection errors (e.g. AIA fetching required) fall back to get_source.
+/// detected. Connection errors (e.g. AIA fetching) fall back to get_source().
 ///
-/// Note: chaser-cf's get_source / solve_waf_session both call wait_for_clearance which
+/// Note: chaser-cf's get_source/solve_waf_session both call wait_for_clearance which
 /// polls for 30 s on non-CF sites. They must only be invoked when CF is detected or
 /// when reqwest cannot connect at all.
 pub async fn fetch(
@@ -105,7 +101,7 @@ pub async fn fetch(
     post_data: Option<&str>,
     proxy_url: Option<&str>,
     extra_cookies: &[RequestCookie],
-) -> Result<Solution> {
+) -> Result<FetchResponse> {
     let extra_cookie_header: String = extra_cookies
         .iter()
         .map(|c| format!("{}={}", c.name, c.value))
@@ -171,19 +167,16 @@ pub async fn fetch(
 
     match pass1 {
         Pass1Result::Clean(status, headers, final_url, body) => {
-            return Ok(Solution {
+            return Ok(FetchResponse {
                 url: final_url,
                 status,
                 headers,
-                response: body,
+                body,
                 cookies: vec![],
                 user_agent: DEFAULT_UA.to_string(),
-                screenshot: None,
             });
         }
         Pass1Result::ConnectionError => {
-            // reqwest cannot reach the site (TLS chain / AIA fetching / old ciphers).
-            // get_source uses Chrome which handles these natively.
             tracing::info!(url, "connection error on fast path — fetching via browser");
             let chaser_proxy = proxy_url
                 .filter(|p| !p.is_empty())
@@ -193,14 +186,13 @@ pub async fn fetch(
                 .get_source(url, chaser_proxy)
                 .await
                 .map_err(FlareSolverError::from)?;
-            return Ok(Solution {
+            return Ok(FetchResponse {
                 url: url.to_string(),
                 status: 200,
                 headers: HashMap::new(),
-                response: html,
+                body: html,
                 cookies: vec![],
                 user_agent: DEFAULT_UA.to_string(),
-                screenshot: None,
             });
         }
         Pass1Result::CfChallenge => {}
@@ -269,18 +261,18 @@ pub async fn fetch(
         .map_err(|e| FlareSolverError::Http(e.to_string()))?;
     let cookies = waf.cookies.into_iter().map(chaser_cookie_to_response).collect();
 
-    Ok(Solution {
+    Ok(FetchResponse {
         url: final_url,
         status,
         headers,
-        response: html,
+        body: html,
         cookies,
         user_agent,
-        screenshot: None,
     })
 }
 
-/// Dispatch a FlareSolverr command.
+/// Dispatch a FlareSolverr protocol command. Returns (status, message, Option<FetchResponse>).
+#[cfg(feature = "server")]
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     store: &Arc<SessionStore>,
@@ -291,14 +283,13 @@ pub async fn dispatch(
     proxy_url: Option<&str>,
     session_id: Option<&str>,
     extra_cookies: &[RequestCookie],
-) -> Result<(String, String, Option<Solution>)> {
+) -> Result<(String, String, Option<FetchResponse>)> {
     match cmd {
         "request.get" | "request.post" => {
-            let url =
-                url.ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
+            let url = url.ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
             let session_proxy = session_id.and_then(|id| store.registry.get_proxy(id));
             let effective_proxy = session_proxy.as_deref().or(proxy_url);
-            let solution = fetch(
+            let resp = fetch(
                 &store.chaser,
                 &store.client,
                 url,
@@ -308,7 +299,7 @@ pub async fn dispatch(
                 extra_cookies,
             )
             .await?;
-            Ok(("ok".into(), String::new(), Some(solution)))
+            Ok(("ok".into(), String::new(), Some(resp)))
         }
         "sessions.create" => {
             let id = store
@@ -318,15 +309,11 @@ pub async fn dispatch(
         }
         "sessions.list" => {
             let ids = store.registry.list();
-            Ok((
-                "ok".into(),
-                serde_json::to_string(&ids).unwrap_or_default(),
-                None,
-            ))
+            Ok(("ok".into(), serde_json::to_string(&ids).unwrap_or_default(), None))
         }
         "sessions.destroy" => {
-            let id =
-                session_id.ok_or_else(|| FlareSolverError::MissingField("session".into()))?;
+            let id = session_id
+                .ok_or_else(|| FlareSolverError::MissingField("session".into()))?;
             store.registry.destroy(id)?;
             Ok(("ok".into(), format!("Session destroyed: {id}"), None))
         }

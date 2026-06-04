@@ -1,7 +1,9 @@
 pub mod config;
 pub mod error;
+#[cfg(feature = "server")]
 pub mod handlers;
 pub mod models;
+#[cfg(feature = "server")]
 pub mod router;
 pub mod session;
 pub mod solver;

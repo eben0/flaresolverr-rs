@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{extract::State, Json};
 
 use crate::error::FlareSolverError;
-use crate::models::{SolveRequest, SolveResponse};
+use crate::models::{Solution, SolveRequest, SolveResponse};
 use crate::session::SessionStore;
 use crate::solver::dispatch;
 
@@ -33,7 +33,7 @@ pub async fn solve_v1(
     Ok(Json(SolveResponse {
         status,
         message,
-        solution,
+        solution: solution.map(Solution::from),
         start_timestamp: start,
         end_timestamp: unix_ms(),
         version: env!("CARGO_PKG_VERSION").into(),
