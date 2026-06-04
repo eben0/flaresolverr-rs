@@ -7,3 +7,9 @@ pub mod models;
 pub mod router;
 pub mod session;
 pub mod solver;
+pub mod solver_api;
+
+pub use config::FlareSolverConfig;
+pub use error::{FlareSolverError, Result};
+pub use models::{FetchRequest, FetchResponse, RequestCookie, ResponseCookie};
+pub use solver_api::FlareSolver;
