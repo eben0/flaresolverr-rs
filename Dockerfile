@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 ARG VERSION=latest
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
@@ -6,7 +8,9 @@ FROM debian:bookworm-slim
 ARG VERSION
 
 # Chrome shared-library deps + Xvfb for virtual display
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates libssl3 \
         fonts-liberation libnss3 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
@@ -16,8 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] \
        http://dl.google.com/linux/chrome/deb/ stable main" \
        > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable
 
 WORKDIR /app
 
