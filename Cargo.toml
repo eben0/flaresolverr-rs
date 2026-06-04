@@ -1,9 +1,14 @@
 [package]
 name = "flaresolverr-rs"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
-description = "Rust port of FlareSolverr — Cloudflare bypass proxy using chaser-cf"
+description = "Cloudflare bypass library and FlareSolverr-compatible HTTP proxy"
 license = "MIT"
+repository = "https://github.com/eben0/flaresolverr-rs"
+keywords = ["cloudflare", "flaresolverr", "bypass", "scraping", "chromium"]
+categories = ["web-programming", "web-programming::http-client"]
+readme = "README.md"
+exclude = ["PLAN.md", "bench/"]
 
 [lib]
 name = "flaresolverr_rs"
@@ -12,25 +17,30 @@ path = "src/lib.rs"
 [[bin]]
 name = "flaresolverr-rs"
 path = "src/main.rs"
+required-features = ["server"]
 
 [[test]]
 name = "prowlarr"
 path = "integration/prowlarr.rs"
 
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:figment", "dep:tracing-subscriber"]
+
 [dependencies]
-axum          = "0.7"
-tokio         = { version = "1", features = ["full"] }
-serde         = { version = "1", features = ["derive"] }
-serde_json    = "1"
-uuid          = { version = "1", features = ["v4"] }
-dashmap       = "6"
-thiserror     = "2"
-tracing       = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-anyhow        = "1"
-figment       = { version = "0.10", features = ["toml", "env"] }
-chaser-cf     = "0.2.1"
-reqwest       = { version = "0.12", features = ["json"] }
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+uuid               = { version = "1", features = ["v4"] }
+dashmap            = "6"
+thiserror          = "2"
+tracing            = "0.1"
+anyhow             = "1"
+chaser-cf          = "0.2.1"
+reqwest            = { version = "0.12", features = ["json"] }
+axum               = { version = "0.7", optional = true }
+figment            = { version = "0.10", features = ["toml", "env"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 
 [dev-dependencies]
 serde_yaml = "0.9"
