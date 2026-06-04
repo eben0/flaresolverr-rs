@@ -7,19 +7,11 @@ use crate::error::{FlareSolverError, Result};
 use crate::models::{RequestCookie, ResponseCookie, Solution};
 use crate::session::SessionStore;
 
-fn redact_url(url: &str) -> String {
-    match (url.find("://"), url.rfind('@')) {
-        (Some(s), Some(a)) if a > s + 3 => format!("{}://***@{}", &url[..s], &url[a + 1..]),
-        _ => url.to_string(),
-    }
-}
-
 /// Parse "scheme://[user:pass@]host:port" into a chaser_cf ProxyConfig.
 pub fn parse_proxy_url(url: &str) -> Result<ProxyConfig> {
-    let safe = redact_url(url);
     let (scheme, rest) = url
         .split_once("://")
-        .ok_or_else(|| FlareSolverError::Browser(format!("invalid proxy URL: {safe}")))?;
+        .ok_or_else(|| FlareSolverError::Browser("proxy URL must include a scheme (e.g. http://host:port)".into()))?;
 
     let (creds, hostport) = if let Some(at) = rest.rfind('@') {
         (Some(&rest[..at]), &rest[at + 1..])
@@ -29,10 +21,10 @@ pub fn parse_proxy_url(url: &str) -> Result<ProxyConfig> {
 
     let (host, port_str) = hostport
         .rsplit_once(':')
-        .ok_or_else(|| FlareSolverError::Browser(format!("proxy URL missing port: {safe}")))?;
+        .ok_or_else(|| FlareSolverError::Browser("proxy URL missing port".into()))?;
     let port = port_str
         .parse::<u16>()
-        .map_err(|_| FlareSolverError::Browser(format!("invalid proxy port in: {safe}")))?;
+        .map_err(|_| FlareSolverError::Browser("proxy URL has invalid port".into()))?;
 
     let mut cfg = ProxyConfig::new(host, port).with_scheme(scheme);
     if let Some(creds) = creds {
