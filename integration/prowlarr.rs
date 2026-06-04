@@ -22,8 +22,10 @@ async fn start_test_server() -> String {
             ChaserConfig::default()
                 .with_headless(true)
                 .with_virtual_display(true)
+                .with_timeout_ms(120_000) // > 90s so non-CF sites clear wait_for_clearance
                 .with_context_limit(5)
-                .add_extra_arg("--no-sandbox"),
+                .add_extra_arg("--no-sandbox")
+                .add_extra_arg("--disable-gpu"),
         )
         .await
         .expect("failed to init ChaserCF"),

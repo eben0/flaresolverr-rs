@@ -11,9 +11,11 @@ async fn start_test_server() -> String {
         ChaserCF::new(
             ChaserConfig::default()
                 .with_headless(true)
+                .with_timeout_ms(120_000) // > 90s so non-CF sites clear wait_for_clearance
                 .with_context_limit(2)
                 .with_lazy_init(true)
-                .add_extra_arg("--no-sandbox"),
+                .add_extra_arg("--no-sandbox")
+                .add_extra_arg("--disable-gpu"),
         )
         .await
         .unwrap(),
