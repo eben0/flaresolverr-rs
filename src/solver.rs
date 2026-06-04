@@ -124,34 +124,77 @@ pub async fn fetch(
         direct_req.header("Cookie", &extra_cookie_header)
     };
 
-    let direct_resp = direct_req
-        .send()
-        .await
-        .map_err(|e| FlareSolverError::Http(e.to_string()))?;
+    enum Pass1Result {
+        Clean(u16, HashMap<String, String>, String, String), // status, headers, final_url, body
+        CfChallenge,
+        ConnectionError,
+    }
 
-    let direct_status = direct_resp.status().as_u16();
-    let direct_headers: HashMap<String, String> = direct_resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-    let direct_final_url = direct_resp.url().to_string();
-    let direct_body = direct_resp
-        .text()
-        .await
-        .map_err(|e| FlareSolverError::Http(e.to_string()))?;
+    let pass1 = match direct_req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let headers: HashMap<String, String> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let final_url = resp.url().to_string();
+            match resp.text().await {
+                Ok(body) => {
+                    if is_cf_challenge(status, &headers, &body) {
+                        Pass1Result::CfChallenge
+                    } else {
+                        Pass1Result::Clean(status, headers, final_url, body)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(url, error = %e, "Pass 1 body read failed — falling back to browser");
+                    Pass1Result::ConnectionError
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(url, error = %e, "Pass 1 connection failed — falling back to browser");
+            Pass1Result::ConnectionError
+        }
+    };
 
-    if !is_cf_challenge(direct_status, &direct_headers, &direct_body) {
-        // Non-CF response — return immediately without touching Chrome.
-        return Ok(Solution {
-            url: direct_final_url,
-            status: direct_status,
-            headers: direct_headers,
-            response: direct_body,
-            cookies: vec![],
-            user_agent: DEFAULT_UA.to_string(),
-            screenshot: None,
-        });
+    match pass1 {
+        Pass1Result::Clean(status, headers, final_url, body) => {
+            // Non-CF response — return immediately without touching Chrome.
+            return Ok(Solution {
+                url: final_url,
+                status,
+                headers,
+                response: body,
+                cookies: vec![],
+                user_agent: DEFAULT_UA.to_string(),
+                screenshot: None,
+            });
+        }
+        Pass1Result::ConnectionError => {
+            // reqwest can't reach the site (TLS chain issue, old ciphers, etc.).
+            // Chrome handles these cases gracefully — use get_source directly.
+            tracing::info!(url, "connection error on fast path — fetching via browser");
+            let chaser_proxy = proxy_url
+                .filter(|p| !p.is_empty())
+                .map(parse_proxy_url)
+                .transpose()?;
+            let html = chaser
+                .get_source(url, chaser_proxy)
+                .await
+                .map_err(FlareSolverError::from)?;
+            return Ok(Solution {
+                url: url.to_string(),
+                status: 200,
+                headers: HashMap::new(),
+                response: html,
+                cookies: vec![],
+                user_agent: DEFAULT_UA.to_string(),
+                screenshot: None,
+            });
+        }
+        Pass1Result::CfChallenge => {}
     }
 
     tracing::info!(url, "CF challenge detected — engaging browser bypass");
