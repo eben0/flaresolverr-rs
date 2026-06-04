@@ -1,0 +1,37 @@
+[package]
+name = "flaresolverr-rs"
+version = "0.1.9"
+edition = "2021"
+description = "Rust port of FlareSolverr — Cloudflare bypass proxy using chaser-cf"
+license = "MIT"
+
+[lib]
+name = "flaresolverr_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flaresolverr-rs"
+path = "src/main.rs"
+
+[[test]]
+name = "prowlarr"
+path = "integration/prowlarr.rs"
+
+[dependencies]
+axum          = "0.7"
+tokio         = { version = "1", features = ["full"] }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+uuid          = { version = "1", features = ["v4"] }
+dashmap       = "6"
+thiserror     = "2"
+tracing       = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow        = "1"
+figment       = { version = "0.10", features = ["toml", "env"] }
+chaser-cf     = "*"
+reqwest       = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+dotenv     = "0.15"
