@@ -1,6 +1,11 @@
 services:
   flaresolverr-rs:
-    build: .
+    # Build local source on Debian bookworm (matches the bookworm-slim runtime
+    # glibc). The lightweight Dockerfile downloads a prebuilt release binary,
+    # which skews glibc when that binary was built on a newer host.
+    build:
+      context: .
+      dockerfile: Dockerfile.build
     ports:
       - "8191:8191"
     restart: unless-stopped

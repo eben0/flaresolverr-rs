@@ -13,20 +13,27 @@ jobs:
   build-binary:
     name: Build binary
     runs-on: ubuntu-latest
+    # Build inside Debian bookworm (glibc 2.36) so the binary matches the
+    # debian:bookworm-slim runtime. Building on ubuntu-latest (glibc 2.39)
+    # produced binaries that failed at runtime with:
+    #   version `GLIBC_2.39' not found (required by ./flaresolverr-rs)
+    container: rust:1.96-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends pkg-config libssl-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-bookworm-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
         run: cargo build --release --bin flaresolverr-rs
