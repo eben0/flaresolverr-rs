@@ -39,7 +39,7 @@ jobs:
         run: cargo build --release --bin flaresolverr-rs
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: flaresolverr-rs-linux-amd64
           path: target/release/flaresolverr-rs
