@@ -105,6 +105,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          pull: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.major_minor }}
