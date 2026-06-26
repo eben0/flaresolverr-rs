@@ -12,6 +12,7 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    environment: crates-io
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +27,14 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
 
       - name: Publish to crates.io
         run: cargo publish --locked
