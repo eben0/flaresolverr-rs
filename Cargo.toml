@@ -1,6 +1,6 @@
 [package]
 name = "flaresolverr-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Cloudflare bypass library and FlareSolverr-compatible HTTP proxy"
 license = "MIT"
