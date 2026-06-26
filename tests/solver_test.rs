@@ -1,5 +1,5 @@
 use chaser_cf::Cookie;
-use flaresolverr_rs::solver::{chaser_cookie_to_response, parse_proxy_url};
+use flaresolverr_rs::solver::{chaser_cookie_to_response, is_challenge_title, parse_proxy_url};
 
 #[test]
 fn test_parse_proxy_no_auth() {
@@ -64,4 +64,22 @@ fn test_chaser_cookie_no_expiry_is_session() {
     };
     let rc = chaser_cookie_to_response(cookie);
     assert!(rc.session);
+}
+
+#[test]
+fn test_is_challenge_title_detects_walls() {
+    assert!(is_challenge_title("Just a moment...")); // Cloudflare
+    assert!(is_challenge_title("Bloomberg - Are you a robot?")); // PerimeterX
+    assert!(is_challenge_title("Attention Required! | Cloudflare"));
+    assert!(is_challenge_title("Access denied"));
+    assert!(is_challenge_title("CHECKING YOUR BROWSER")); // case-insensitive
+}
+
+#[test]
+fn test_is_challenge_title_allows_real_titles() {
+    assert!(!is_challenge_title(
+        "Gold Steadies Near $4,000 as Inflation Data Eases Rate-Hike Bets - Bloomberg"
+    ));
+    assert!(!is_challenge_title("Example Domain"));
+    assert!(!is_challenge_title(""));
 }

@@ -1,8 +1,9 @@
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chaser_cf::ChaserCF;
+use chaser_cf::core::BrowserManager;
+use chaser_cf::ChaserConfig;
 use dashmap::DashMap;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::error::{FlareSolverError, Result};
@@ -65,24 +66,39 @@ impl Default for SessionRegistry {
     }
 }
 
-/// Application-level session store: registry + shared ChaserCF instance + shared HTTP client.
+/// Application-level session store: registry + lazily-launched shared browser.
+///
+/// Every fetch is driven through the browser (a real stealth Chrome): we navigate,
+/// solve any challenge, and return the rendered DOM from the same session — so the
+/// content provenance is the browser that passed the WAF, not a separate HTTP client.
+///
+/// The browser is launched on first use ([`browser`](Self::browser)), so endpoints
+/// that never fetch (health, session bookkeeping) need no Chrome. Callers wanting
+/// fail-fast startup force initialization once via `store.browser().await?`.
 pub struct SessionStore {
     pub registry: SessionRegistry,
-    pub chaser: Arc<ChaserCF>,
-    /// Shared reqwest client for no-proxy requests — reuses TCP connections and TLS sessions.
-    pub client: reqwest::Client,
+    config: ChaserConfig,
+    browser: OnceCell<BrowserManager>,
 }
 
 impl SessionStore {
-    pub fn new(chaser: Arc<ChaserCF>) -> Self {
+    pub fn new(config: ChaserConfig) -> Self {
         Self {
             registry: SessionRegistry::new(),
-            chaser,
-            client: reqwest::Client::builder()
-                .user_agent(crate::solver::DEFAULT_UA)
-                .build()
-                .expect("failed to build shared HTTP client"),
+            config,
+            browser: OnceCell::new(),
         }
+    }
+
+    /// Get the shared browser, launching it on first call.
+    pub async fn browser(&self) -> Result<&BrowserManager> {
+        self.browser
+            .get_or_try_init(|| async {
+                BrowserManager::new(&self.config)
+                    .await
+                    .map_err(FlareSolverError::from)
+            })
+            .await
     }
 }
 

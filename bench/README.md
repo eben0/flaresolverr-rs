@@ -38,33 +38,27 @@ Output is written to `bench/report-YYYYMMDD-HHMMSS.md`.
 
 ## Latest Results
 
-See [report-20260604-164341.md](report-20260604-164341.md).
+See [report-20260626-225050.md](report-20260626-225050.md).
 
-**20 indexers · 3 runs · 2026-06-04**
+**20 indexers · single run · 2026-06-26**
 
-| Implementation | Pass rate | Avg latency | p95 latency |
-|----------------|-----------|-------------|-------------|
-| flaresolverr-rs | 20/20 (100%) | 2.7s | 3.6s |
-| flaresolverr-py | 20/20 (100%) | 3.9s | 12.7s |
+| Implementation | Pass rate | Avg latency | p50 | p95 |
+|----------------|-----------|-------------|-----|-----|
+| flaresolverr-rs | 20/20 (100%) | 3.1s | 3.0s | 4.0s |
+| flaresolverr-py | 20/20 (100%) | 3.9s | 2.1s | 11.8s |
 
-rs is **1.4× faster** on average and **3.5× faster** at p95 (CF-protected sites dominate p95 because py re-solves the Turnstile challenge on every request while rs reuses its cached clearance cookie).
+rs is **1.3× faster** on average and **~3× faster** at p95, with a tight distribution (p50 3.0s → p95 4.0s). CF-protected sites dominate py's p95 because it re-solves the Turnstile challenge on every request (~11s) while rs reuses its cached clearance cookie (~3s).
 
 ## Architecture Notes
 
-### Two-pass fetch (rs)
+### Browser-driven fetch (rs)
 
-1. **Pass 1 — reqwest direct**: Fast for ~75% of sites (no CF protection). Completes in ~2s.
-2. **Pass 2 — Chrome via chaser-cf**: Only triggered on a CF challenge response (HTTP 403/503 with CF markers). Returns in ~3s due to cached `cf_clearance`.
-3. **Fallback — `get_source()`**: Used only when reqwest cannot connect (TLS chain / AIA fetching required). Chrome handles these natively.
-
-### Why not use Chrome for all GETs?
-
-`chaser-cf::get_source()` calls `wait_for_clearance(30s)` internally — it polls for a `cf_clearance` cookie before returning. On non-CF sites that cookie never appears, so every call blocks for the full 30 seconds. This would make non-CF sites ~33s instead of ~2s.
+Every request is navigated in a real stealth Chrome (via `chaser-cf` / `chaser-oxide`) and the rendered DOM is returned from the **same** session that passed the WAF. There is no separate HTTP client, so the content provenance is the browser that cleared the challenge — which is what lets rs defeat fingerprint/behavioural bot-management (Cloudflare, PerimeterX/HUMAN, Datadome), not just Cloudflare. A **smart wait** returns as soon as the page settles (`readyState=complete` and not a challenge) or a `cf_clearance` cookie appears, so clean sites finish in ~2–3s rather than blocking on a fixed timeout.
 
 ### Why py is slower on CF sites
 
-flaresolverr-py (Chrome inside Docker/Linux) re-solves the Turnstile challenge on every request (~11s each). rs keeps the `cf_clearance` cookie cached in its browser context and reuses it, reducing CF-site latency to ~3s.
+flaresolverr-py re-solves the Turnstile challenge on every request (~11s each). rs keeps the `cf_clearance` cookie cached in its shared browser context and reuses it, reducing CF-site latency to ~3s.
 
-### Why py is faster on non-CF sites
+### Why py is faster on plain non-CF sites
 
-py fires at `DOMContentLoaded` (~1.7s); rs downloads the full response body via reqwest (~2.4s). The gap is structural and cannot be closed with chaser-cf 0.2.1 — see the architecture note above.
+py fires at `DOMContentLoaded` (~1.7s); rs runs a full stealth-browser navigation for every site (~3s). That extra cost is deliberate — it is what allows rs to clear fingerprint WAFs (PerimeterX/HUMAN, Datadome) where a plain HTTP client only ever gets a bot-wall.
