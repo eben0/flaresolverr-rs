@@ -38,7 +38,7 @@ tracing            = "0.1"
 anyhow             = "1"
 chaser-cf          = "0.2.1"
 reqwest            = { version = "0.13", features = ["json"] }
-axum               = { version = "0.7", optional = true }
+axum               = { version = "0.8", optional = true }
 figment            = { version = "0.10", features = ["toml", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 
