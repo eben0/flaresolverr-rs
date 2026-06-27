@@ -94,9 +94,11 @@ impl SessionStore {
     pub async fn browser(&self) -> Result<&BrowserManager> {
         self.browser
             .get_or_try_init(|| async {
-                BrowserManager::new(&self.config)
+                let browser = BrowserManager::new(&self.config)
                     .await
-                    .map_err(FlareSolverError::from)
+                    .map_err(FlareSolverError::from)?;
+                tracing::info!("browser ready");
+                Ok(browser)
             })
             .await
     }

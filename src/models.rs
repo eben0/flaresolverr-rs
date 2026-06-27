@@ -96,6 +96,37 @@ fn default_timeout() -> u64 { 60_000 }
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProxyConfig {
     pub url: Option<String>,
+    /// Optional proxy auth. FlareSolverr and Prowlarr send credentials as
+    /// these separate fields (NOT embedded in `url`); `effective_url` folds
+    /// them back into the URL so the rest of the pipeline sees one string.
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[cfg(feature = "server")]
+impl ProxyConfig {
+    /// The proxy URL with `username`/`password` spliced into the userinfo when
+    /// supplied as separate fields. Prowlarr and the FlareSolverr API send
+    /// proxy credentials this way; without folding them in they are silently
+    /// dropped and the proxy rejects Chrome (net::ERR_INVALID_AUTH_CREDENTIALS).
+    /// A URL that already carries `user:pass@` userinfo is returned unchanged.
+    pub fn effective_url(&self) -> Option<String> {
+        let url = self.url.as_deref().map(str::trim).filter(|u| !u.is_empty())?;
+        let user = self.username.as_deref().unwrap_or("");
+        let pass = self.password.as_deref().unwrap_or("");
+        if user.is_empty() {
+            return Some(url.to_string());
+        }
+        match url.find("://") {
+            // Already has embedded credentials — don't double-splice.
+            Some(i) if url[i + 3..].contains('@') => Some(url.to_string()),
+            Some(i) => Some(format!("{}://{user}:{pass}@{}", &url[..i], &url[i + 3..])),
+            // No scheme: parse_proxy_url requires one, so default to http.
+            None => Some(format!("http://{user}:{pass}@{url}")),
+        }
+    }
 }
 
 #[cfg(feature = "server")]

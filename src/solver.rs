@@ -86,6 +86,40 @@ fn oxide_to_chaser_cookie(c: network::Cookie) -> Cookie {
 pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+/// Init script that makes `navigator.languages` consistent between the main
+/// thread and Web Workers.
+///
+/// chaser-oxide's native profile applies a CDP `setUserAgentOverride` with
+/// `accept_language` (e.g. `"en-US"`), which collapses the **main** thread's
+/// `navigator.languages` to a single entry (`["en-US"]`). That override does
+/// **not** reach worker contexts, where `navigator.languages` keeps Chrome's
+/// natural expansion (`["en-US","en"]`). Fingerprint WAFs spawn a worker and
+/// compare its `navigator` against the page's; the mismatch
+/// (`hasInconsistentWorkerValues`) was the lone signal labelling the stealth
+/// browser "a bot" on deviceandbrowserinfo.com.
+///
+/// We fix it on the **main thread only**: redefine `navigator.languages` to the
+/// natural `[lang, base]` expansion the workers already report, so both sides
+/// agree without touching any worker.
+///
+/// An earlier version wrapped `Worker` to inject the values into each worker via
+/// a `blob:` script + `importScripts`. That broke WAF bypass: Cloudflare and
+/// Turnstile challenge pages forbid `blob:` workers through a `worker-src` CSP,
+/// so the wrapped worker was blocked and their proof-of-work never ran — the
+/// challenges silently failed to solve. The main-thread override avoids all
+/// worker tampering and so cannot break challenge pages.
+const LANGUAGES_CONSISTENCY_JS: &str = r#"(function () {
+  try {
+    var lang = navigator.language || 'en-US';
+    var base = lang.indexOf('-') > 0 ? lang.split('-')[0] : lang;
+    var list = base === lang ? [lang] : [lang, base];
+    Object.defineProperty(Navigator.prototype, 'languages', {
+      get: function () { return list.slice(); },
+      configurable: true
+    });
+  } catch (e) {}
+})();"#;
+
 /// Return true if a page title looks like a bot/WAF interstitial (Cloudflare,
 /// PerimeterX, generic "access denied", etc.) rather than real content.
 pub fn is_challenge_title(title: &str) -> bool {
@@ -105,6 +139,24 @@ pub fn is_challenge_title(title: &str) -> bool {
     MARKERS.iter().any(|m| t.contains(m))
 }
 
+/// True when a navigation error matches the proxy/auth failures a *cold* first
+/// proxied request can produce: the initial proxied CONNECT can race ahead of
+/// the CDP Fetch auth-interception that `authenticate()` enables, so Chrome
+/// answers the proxy 407 with no credentials and the tunnel fails. These clear
+/// on a second attempt (the handler is live by then), so [`fetch`] retries once.
+pub fn is_proxy_retryable_error(msg: &str) -> bool {
+    let m = msg.to_ascii_uppercase();
+    [
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_INVALID_AUTH_CREDENTIALS",
+        "ERR_PROXY_AUTH_REQUESTED",
+        "ERR_NO_SUPPORTED_PROXIES",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
 /// Snapshot of the live page used to decide when a fetch has settled.
 struct PageState {
     /// `document.readyState === 'complete'`.
@@ -113,16 +165,40 @@ struct PageState {
     challenge: bool,
     /// An interactive Cloudflare Turnstile widget is present.
     turnstile: bool,
+    /// Milliseconds since the most recent network resource finished loading
+    /// (large when nothing is in flight) — our network-idle signal.
+    idle_ms: u64,
+    /// Length of the serialized DOM; used to detect when rendering has stopped.
+    dom_len: u64,
 }
 
-/// JS object reporting raw page signals. Detection logic lives in Rust
-/// ([`is_challenge_title`]) so it stays in one place and is unit-testable.
-const PAGE_STATE_JS: &str = r#"({
-  ready: document.readyState === 'complete',
-  title: document.title || '',
-  turnstile: !!document.querySelector('[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com"], div.cf-turnstile'),
-  px: !!document.querySelector('#px-captcha, [id^="px-captcha"], .px-captcha, #px-block')
-})"#;
+/// JS reporting raw page signals. Detection logic lives in Rust
+/// ([`is_challenge_title`], [`page_settled`]) so it stays in one place and is
+/// unit-testable. `idleMs` comes from the Resource Timing buffer (time since the
+/// last resource's `responseEnd`); `domLen` is the serialized DOM length.
+const PAGE_STATE_JS: &str = r#"(() => {
+  const res = performance.getEntriesByType('resource');
+  let last = 0;
+  for (let i = 0; i < res.length; i++) { const e = res[i].responseEnd; if (e > last) last = e; }
+  const de = document.documentElement;
+  return {
+    ready: document.readyState === 'complete',
+    title: document.title || '',
+    turnstile: !!document.querySelector('[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com"], div.cf-turnstile'),
+    px: !!document.querySelector('#px-captcha, [id^="px-captcha"], .px-captcha, #px-block'),
+    idleMs: Math.round(performance.now() - last),
+    domLen: de ? de.innerHTML.length : 0
+  };
+})()"#;
+
+/// Read a non-negative integer field from a JS-returned object (numbers may come
+/// back as floats).
+fn json_u64(o: &serde_json::Value, key: &str) -> u64 {
+    o.get(key)
+        .and_then(|x| x.as_f64())
+        .map(|f| f.max(0.0) as u64)
+        .unwrap_or(0)
+}
 
 async fn read_page_state(chaser: &ChaserPage) -> PageState {
     let v = chaser.evaluate(PAGE_STATE_JS).await.ok().flatten();
@@ -138,12 +214,16 @@ async fn read_page_state(chaser: &ChaserPage) -> PageState {
                 ready: o.get("ready").and_then(|x| x.as_bool()).unwrap_or(false),
                 challenge: is_challenge_title(title) || turnstile || px,
                 turnstile,
+                idle_ms: json_u64(&o, "idleMs"),
+                dom_len: json_u64(&o, "domLen"),
             }
         }
         None => PageState {
             ready: false,
             challenge: false,
             turnstile: false,
+            idle_ms: 0,
+            dom_len: 0,
         },
     }
 }
@@ -156,11 +236,39 @@ async fn has_clearance_cookie(page: &Page) -> bool {
         .unwrap_or(false)
 }
 
+// ── settle thresholds ────────────────────────────────────────────────────────
+/// No network resource has finished loading for this long ⇒ the network is idle.
+const NET_IDLE_MS: u64 = 500;
+/// Once the network is idle, the DOM must also be unchanged for this long.
+const SETTLE_QUIET: Duration = Duration::from_millis(600);
+/// Safety valve: settle when the DOM has been quiet this long even if the network
+/// never goes idle (pages with persistent analytics / polling connections).
+const MAX_QUIET: Duration = Duration::from_millis(2_500);
+
+/// Decide whether a non-challenge page has rendered enough to capture.
+///
+/// `network_idle` — no network resource finished within [`NET_IDLE_MS`].
+/// `quiet` — how long the serialized DOM has been unchanged.
+///
+/// Settles when the page is `ready`, not a challenge, and either the network is
+/// idle with a brief DOM-quiet confirmation, or the DOM has been quiet long enough
+/// on its own — which bounds the wait on pages whose network never goes idle.
+pub fn page_settled(ready: bool, challenge: bool, network_idle: bool, quiet: Duration) -> bool {
+    if !ready || challenge {
+        return false;
+    }
+    (network_idle && quiet >= SETTLE_QUIET) || quiet >= MAX_QUIET
+}
+
 /// Wait until the page has settled on real content or a challenge has been solved,
 /// up to `max`. Returns as soon as either:
 ///   - a `cf_clearance` cookie appears (Cloudflare cleared), or
-///   - the page is `readyState=complete` and no longer looks like a challenge
-///     (clean sites, and passively-admitted PerimeterX pages, return fast here).
+///   - the page is `readyState=complete`, not a challenge, and has gone
+///     network-idle with a stable DOM ([`page_settled`]).
+///
+/// Waiting for network-idle + DOM stability (rather than snapshotting at
+/// `readyState=complete`) lets post-load JS finish — XHR-rendered content, SPA
+/// hydration, web-worker fingerprint tests — before we capture the DOM.
 ///
 /// Interactive Cloudflare Turnstile widgets are clicked after a passive window —
 /// CF's managed-challenge JS runs its invisible proof-of-work first, and touching
@@ -169,11 +277,11 @@ async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
     const PASSIVE_WAIT: Duration = Duration::from_millis(6_000);
     const CLICK_INTERVAL: Duration = Duration::from_millis(1_200);
     const POLL: Duration = Duration::from_millis(400);
-    const STABLE_REQUIRED: u32 = 2;
 
     let start = Instant::now();
     let mut last_click: Option<Instant> = None;
-    let mut stable = 0u32;
+    let mut prev_dom: Option<u64> = None;
+    let mut last_dom_change = start;
 
     loop {
         if start.elapsed() >= max {
@@ -186,13 +294,19 @@ async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
         }
 
         let st = read_page_state(chaser).await;
-        if st.ready && !st.challenge {
-            stable += 1;
-            if stable >= STABLE_REQUIRED {
-                return;
-            }
-        } else {
-            stable = 0;
+
+        if prev_dom != Some(st.dom_len) {
+            prev_dom = Some(st.dom_len);
+            last_dom_change = Instant::now();
+        }
+
+        if page_settled(
+            st.ready,
+            st.challenge,
+            st.idle_ms >= NET_IDLE_MS,
+            last_dom_change.elapsed(),
+        ) {
+            return;
         }
 
         if st.turnstile
@@ -241,6 +355,11 @@ pub async fn fetch(
         .await
         .map_err(FlareSolverError::from)?;
 
+    // Align navigator.languages between the main thread and workers (best-effort,
+    // main-thread only). Registered now, before navigation, so it runs on the
+    // target document.
+    let _ = page.add_init_script(LANGUAGES_CONSISTENCY_JS).await;
+
     if let Some(p) = &proxy {
         if let (Some(user), Some(pass)) = (&p.username, &p.password) {
             if let Err(e) = page
@@ -256,7 +375,24 @@ pub async fn fetch(
         }
     }
 
-    if let Err(e) = chaser.goto(url).await {
+    // Navigate. The first proxied request can lose a race between the proxy
+    // CONNECT and the CDP Fetch auth-interception set up above, surfacing as
+    // ERR_TUNNEL_CONNECTION_FAILED / ERR_INVALID_AUTH_CREDENTIALS even when the
+    // credentials are correct. The handler is active by the time that error
+    // returns, so retry the navigation once for authenticated proxies.
+    let proxy_auth = proxy
+        .as_ref()
+        .is_some_and(|p| p.username.is_some() && p.password.is_some());
+    let mut goto_res = chaser.goto(url).await;
+    if proxy_auth
+        && goto_res
+            .as_ref()
+            .err()
+            .is_some_and(|e| is_proxy_retryable_error(&e.to_string()))
+    {
+        goto_res = chaser.goto(url).await;
+    }
+    if let Err(e) = goto_res {
         let _ = page.close().await;
         return Err(FlareSolverError::Browser(e.to_string()));
     }

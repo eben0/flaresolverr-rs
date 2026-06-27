@@ -17,14 +17,16 @@ pub async fn solve_v1(
     let start = unix_ms();
     log_request(&req);
 
-    let proxy_url = req.proxy.as_ref().and_then(|p| p.url.as_deref());
+    // Fold separate username/password proxy fields into the URL (Prowlarr/
+    // FlareSolverr send them split out); otherwise the credentials are dropped.
+    let proxy_url = req.proxy.as_ref().and_then(|p| p.effective_url());
     let (status, message, solution) = dispatch(
         &store,
         &req.cmd,
         req.url.as_deref(),
         req.cmd == "request.post",
         req.post_data.as_deref(),
-        proxy_url,
+        proxy_url.as_deref(),
         req.session.as_deref(),
         req.cookies.as_deref().unwrap_or(&[]),
         req.max_timeout,
@@ -60,6 +62,12 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// True if a proxy URL embeds `user:pass@` userinfo.
+fn u_has_userinfo(url: Option<&str>) -> bool {
+    url.and_then(|u| u.find("://").map(|i| u[i + 3..].contains('@')))
+        .unwrap_or(false)
+}
+
 fn log_request(req: &SolveRequest) {
     let url_part = req
         .url
@@ -74,17 +82,24 @@ fn log_request(req: &SolveRequest) {
     let proxy_part = req
         .proxy
         .as_ref()
-        .map(|p| match p.url.as_deref() {
-            Some(u) => {
-                let redacted = match (u.find("://"), u.find('@')) {
-                    (Some(s), Some(a)) if a > s => {
-                        format!("{}://***@{}", &u[..s], &u[a + 1..])
-                    }
-                    _ => u.to_string(),
-                };
-                format!(", 'proxy': {{'url': '{redacted}'}}")
+        .map(|p| {
+            let auth = if p.username.is_some() || u_has_userinfo(p.url.as_deref()) {
+                ", 'hasAuth': true"
+            } else {
+                ""
+            };
+            match p.url.as_deref() {
+                Some(u) => {
+                    let redacted = match (u.find("://"), u.find('@')) {
+                        (Some(s), Some(a)) if a > s => {
+                            format!("{}://***@{}", &u[..s], &u[a + 1..])
+                        }
+                        _ => u.to_string(),
+                    };
+                    format!(", 'proxy': {{'url': '{redacted}'{auth}}}")
+                }
+                None => format!(", 'proxy': {{{}}}", auth.trim_start_matches(", ")),
             }
-            None => ", 'proxy': {}".to_string(),
         })
         .unwrap_or_default();
     tracing::info!(

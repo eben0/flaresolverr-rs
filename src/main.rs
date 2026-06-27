@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("initializing browser engine");
     let store = Arc::new(SessionStore::new(solver_cfg.to_chaser_config()));
     // Launch Chrome eagerly so startup fails fast if the browser can't start.
+    // (`SessionStore::browser` logs "browser ready" once the engine is up.)
     if !solver_cfg.lazy_init {
         store.browser().await.map_err(|e| anyhow::anyhow!("{e}"))?;
     }
