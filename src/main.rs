@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chaser_cf::ChaserCF;
 use flaresolverr_rs::config::load;
 use flaresolverr_rs::router::create_router;
 use flaresolverr_rs::session::SessionStore;
@@ -17,9 +16,12 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    tracing::info!("initializing chaser-cf browser engine");
-    let chaser = Arc::new(ChaserCF::new(solver_cfg.to_chaser_config()).await?);
-    let store = Arc::new(SessionStore::new(chaser));
+    tracing::info!("initializing browser engine");
+    let store = Arc::new(SessionStore::new(solver_cfg.to_chaser_config()));
+    // Launch Chrome eagerly so startup fails fast if the browser can't start.
+    if !solver_cfg.lazy_init {
+        store.browser().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
     let router = create_router(store);
     let addr = format!("{}:{}", server_cfg.host, server_cfg.port);
 

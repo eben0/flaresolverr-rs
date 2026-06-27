@@ -19,17 +19,42 @@ cargo test
 
 ## Architecture
 
-**Two-pass fetch** (`src/solver.rs::fetch`):
+**All-browser fetch** (`src/solver.rs::fetch`): every request is driven through a real
+stealth Chrome — navigate, solve any challenge, and return the rendered DOM from the
+*same* session that passed the WAF (like flaresolverr-py). This is what lets it beat
+fingerprint/behavioural WAFs (PerimeterX/HUMAN on Bloomberg, Datadome, Akamai), not just
+Cloudflare. There is **no reqwest fetch path** anymore.
 
-1. **Pass 1 — reqwest direct**: Fast path for non-CF sites. Uses the shared `reqwest::Client` from `SessionStore` (connection pooling). Returns immediately on HTTP 200.
-2. **Pass 2 — chaser-cf**: Triggered on CF challenge (HTTP 403/503 with CF markers). Calls `solve_waf_session()` which caches `cf_clearance` in the browser context. Then a second reqwest call with the clearance cookies fetches the actual page.
-3. **Fallback — `get_source()`**: Used only when reqwest cannot connect (TLS chain / AIA fetching). NOT used as a general fast path.
+Flow:
+1. `acquire_permit()` (bounds concurrency to `context_limit`) → `create_context()`
+   (incognito per proxied request; shared default context otherwise, so `cf_clearance`
+   carries across requests) → `new_page("about:blank")` (applies the native stealth
+   profile) → proxy auth → `goto(url)`.
+2. **`solve_and_wait`** — a smart wait that returns as soon as *either* a `cf_clearance`
+   cookie appears (Cloudflare cleared) *or* the page is `readyState=complete` and no
+   longer looks like a challenge (`is_challenge_title` + Turnstile/PerimeterX selectors).
+   Clean sites and passively-admitted PerimeterX pages return in ~2–8s. Interactive
+   Cloudflare Turnstile widgets are clicked via a ported CDP shadow-root + Bezier-cursor
+   routine after a 6s passive window.
+3. GET returns `page.content()` (rendered DOM); POST runs an in-page `fetch()` from the
+   page's JS context. Status/headers are synthesized (200 / `{}`) since CDP navigation
+   doesn't surface them — same as flaresolverr-py.
 
-**Why `get_source()` cannot replace the reqwest fast path**: chaser-cf 0.2.1's `get_source()` calls `wait_for_clearance(30s)` which polls for a `cf_clearance` cookie before returning. On non-CF sites the cookie never appears, so every call blocks for the full 30s. Source: `chaser-cf-0.2.1/src/core/solver.rs:30`.
+**Why we drive `BrowserManager` directly (not chaser-cf's `get_source`)**: chaser-cf
+0.2.1's `get_source()` hardcodes `wait_for_clearance(30s)` (`chaser-cf-0.2.1/src/core/solver.rs:30`)
+which polls for `cf_clearance` — on any non-CF site the cookie never appears, so it blocks
+the full 30s. We instead use the public `chaser_cf::core::BrowserManager` (+ a direct
+`chaser-oxide 0.2.4` dep, matching chaser-cf's exact features so the `Page` types unify)
+with our own `solve_and_wait`, which early-exits on settle. Turnstile-click logic is ported
+into `solver.rs` because it lives in chaser-cf's private solver.
 
-**Config** (`src/config.rs`): uses figment with `config.toml` + `FLARESOLVERR_` env vars. Fields use snake_case (no `rename_all` — TOML and JSON use the same names).
+**Config** (`src/config.rs`): uses figment with `config.toml` + `FLARESOLVERR_` env vars.
+Fields use snake_case. `headless=false` + a real display (or Xvfb via `virtual_display` on
+Linux) is the strongest stealth and is what passes PerimeterX.
 
-**SessionStore** (`src/session.rs`): owns `Arc<ChaserCF>` (shared browser) + `SessionRegistry` (DashMap of proxy configs) + shared `reqwest::Client`.
+**SessionStore** (`src/session.rs`): owns a lazily-launched `BrowserManager` (in a
+`tokio::sync::OnceCell`, so health/session endpoints need no Chrome) + `SessionRegistry`
+(DashMap of proxy configs). `main.rs`/`FlareSolver::new` force-init eagerly unless `lazy_init`.
 
 ## Running locally
 

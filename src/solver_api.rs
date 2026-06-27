@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use chaser_cf::ChaserCF;
-
 use crate::config::FlareSolverConfig;
 use crate::error::Result;
 use crate::models::{FetchRequest, FetchResponse};
@@ -12,14 +10,23 @@ use crate::solver;
 /// [`get`](FlareSolver::get), [`post`](FlareSolver::post), or [`fetch`](FlareSolver::fetch).
 pub struct FlareSolver {
     store: Arc<SessionStore>,
+    max_timeout_ms: u64,
 }
 
 impl FlareSolver {
     /// Initialize the browser engine and return a ready solver.
     pub async fn new(config: FlareSolverConfig) -> Result<Self> {
-        let chaser = Arc::new(ChaserCF::new(config.to_chaser_config()).await?);
-        let store = Arc::new(SessionStore::new(chaser));
-        Ok(Self { store })
+        let max_timeout_ms = config.max_timeout_ms;
+        let lazy = config.lazy_init;
+        let store = Arc::new(SessionStore::new(config.to_chaser_config()));
+        // Launch Chrome eagerly (fail fast) unless the caller opted into lazy init.
+        if !lazy {
+            store.browser().await?;
+        }
+        Ok(Self {
+            store,
+            max_timeout_ms,
+        })
     }
 
     /// Fetch a URL via GET.
@@ -34,14 +41,15 @@ impl FlareSolver {
 
     /// Fetch a URL with full control over proxy, cookies, and method.
     pub async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse> {
+        let browser = self.store.browser().await?;
         solver::fetch(
-            &self.store.chaser,
-            &self.store.client,
+            browser,
             &req.url,
             req.is_post,
             req.post_data.as_deref(),
             req.proxy.as_deref(),
             &req.cookies,
+            self.max_timeout_ms,
         )
         .await
     }

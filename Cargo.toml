@@ -37,6 +37,8 @@ thiserror          = "2"
 tracing            = "0.1"
 anyhow             = "1"
 chaser-cf          = "0.2.1"
+chaser-oxide       = { version = "0.2.4", default-features = false, features = ["native-tls", "zip0"] }
+rand               = "0.9"
 reqwest            = { version = "0.13", features = ["json"] }
 axum               = { version = "0.8", optional = true }
 figment            = { version = "0.10", features = ["toml", "env"], optional = true }

@@ -27,6 +27,7 @@ pub async fn solve_v1(
         proxy_url,
         req.session.as_deref(),
         req.cookies.as_deref().unwrap_or(&[]),
+        req.max_timeout,
     )
     .await?;
 

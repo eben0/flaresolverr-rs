@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use chaser_cf::{ChaserCF, ChaserConfig};
+use chaser_cf::ChaserConfig;
 use reqwest::Client;
 use tokio::net::TcpListener;
 
@@ -17,20 +17,14 @@ const PROWLARR_DEFS_API: &str =
 async fn start_test_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let chaser = Arc::new(
-        ChaserCF::new(
-            ChaserConfig::default()
-                .with_headless(true)
-                .with_virtual_display(true)
-                .with_timeout_ms(120_000) // > 90s so non-CF sites clear wait_for_clearance
-                .with_context_limit(5)
-                .add_extra_arg("--no-sandbox")
-                .add_extra_arg("--disable-gpu"),
-        )
-        .await
-        .expect("failed to init ChaserCF"),
-    );
-    let store = Arc::new(flaresolverr_rs::session::SessionStore::new(chaser));
+    let config = ChaserConfig::default()
+        .with_headless(true)
+        .with_virtual_display(true)
+        .with_timeout_ms(120_000)
+        .with_context_limit(5)
+        .add_extra_arg("--no-sandbox")
+        .add_extra_arg("--disable-gpu");
+    let store = Arc::new(flaresolverr_rs::session::SessionStore::new(config));
     let router = flaresolverr_rs::router::create_router(store);
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     format!("http://127.0.0.1:{port}")
