@@ -3,8 +3,8 @@ use std::time::Duration;
 use chaser_cf::Cookie;
 use flaresolverr_rs::models::ProxyConfig;
 use flaresolverr_rs::solver::{
-    chaser_cookie_to_response, is_challenge_title, is_proxy_retryable_error, page_settled,
-    parse_proxy_url,
+    body_is_challenge, chaser_cookie_to_response, env_proxy_from, is_challenge_title,
+    is_proxy_retryable_error, is_transient_fetch_error, page_settled, parse_proxy_url, pick_proxy,
 };
 
 #[test]
@@ -107,6 +107,33 @@ fn test_page_settled_on_network_idle_plus_dom_quiet() {
 }
 
 #[test]
+fn test_body_is_challenge_detects_interstitial_by_title() {
+    // The interstitial title trips it → retry on a fresh context.
+    assert!(body_is_challenge(
+        "<html><head><TITLE>Just a moment...</TITLE></head><body>x</body></html>"
+    ));
+    // The real page title does not.
+    assert!(!body_is_challenge(
+        "<html><head><title>Download Movies Torrents | 1337x</title></head><body>x</body></html>"
+    ));
+    // No title, or empty body → not a challenge (don't retry a genuine empty result).
+    assert!(!body_is_challenge("<html><body>no title element here</body></html>"));
+    assert!(!body_is_challenge(""));
+}
+
+#[test]
+fn test_is_transient_fetch_error_matches_flaky_proxy_failures() {
+    // Flaky-proxy signatures observed in practice → retry on a fresh context.
+    assert!(is_transient_fetch_error("browser error: net::ERR_EMPTY_RESPONSE"));
+    assert!(is_transient_fetch_error("browser error: Request timed out."));
+    assert!(is_transient_fetch_error("net::ERR_CONNECTION_RESET"));
+    assert!(is_transient_fetch_error("net::ERR_TUNNEL_CONNECTION_FAILED"));
+    // A stable/permanent failure must NOT be retried (don't burn the timeout budget).
+    assert!(!is_transient_fetch_error("net::ERR_NAME_NOT_RESOLVED"));
+    assert!(!is_transient_fetch_error("missing required field: url"));
+}
+
+#[test]
 fn test_is_proxy_retryable_error_matches_proxy_auth_failures() {
     assert!(is_proxy_retryable_error(
         "browser error: net::ERR_TUNNEL_CONNECTION_FAILED"
@@ -158,4 +185,46 @@ fn test_page_settled_safety_valve_when_network_never_idle() {
     assert!(!page_settled(true, false, false, Duration::from_millis(2_499)));
     // … but a long DOM-quiet bounds the wait regardless of the network
     assert!(page_settled(true, false, false, Duration::from_millis(2_500)));
+}
+
+#[test]
+fn test_pick_proxy_returns_first_nonempty_trimmed() {
+    // Empty and whitespace-only candidates are skipped; the winner is trimmed.
+    assert_eq!(pick_proxy(["", "  ", "http://a:1"]).as_deref(), Some("http://a:1"));
+    assert_eq!(pick_proxy(["  http://b:2  ", "http://c:3"]).as_deref(), Some("http://b:2"));
+}
+
+#[test]
+fn test_pick_proxy_none_when_all_blank() {
+    assert_eq!(pick_proxy(Vec::<String>::new()), None);
+    assert_eq!(pick_proxy(["", "   ", "\t"]), None);
+}
+
+#[test]
+fn test_env_proxy_prefers_https_over_http_and_all() {
+    // HTTPS_PROXY wins the priority order (we fetch https URLs).
+    let lookup = |k: &str| match k {
+        "HTTPS_PROXY" => Some("http://secure:1".to_string()),
+        "HTTP_PROXY" => Some("http://plain:2".to_string()),
+        "ALL_PROXY" => Some("http://all:3".to_string()),
+        _ => None,
+    };
+    assert_eq!(env_proxy_from(lookup).as_deref(), Some("http://secure:1"));
+}
+
+#[test]
+fn test_env_proxy_falls_through_empty_var_to_next() {
+    // A set-but-empty HTTPS_PROXY (common: `HTTP_PROXY=""`) is skipped for the
+    // next non-empty variable rather than treated as "no proxy but present".
+    let lookup = |k: &str| match k {
+        "HTTPS_PROXY" => Some("   ".to_string()),
+        "HTTP_PROXY" => Some("http://plain:2".to_string()),
+        _ => None,
+    };
+    assert_eq!(env_proxy_from(lookup).as_deref(), Some("http://plain:2"));
+}
+
+#[test]
+fn test_env_proxy_none_when_unset() {
+    assert_eq!(env_proxy_from(|_| None), None);
 }

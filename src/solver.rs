@@ -139,6 +139,25 @@ pub fn is_challenge_title(title: &str) -> bool {
     MARKERS.iter().any(|m| t.contains(m))
 }
 
+/// Extract the trimmed `<title>` text from an HTML body, if present.
+pub fn html_title(body: &str) -> Option<String> {
+    let lower = body.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let gt = lower[open..].find('>')? + open + 1;
+    let end = lower[gt..].find("</title>")? + gt;
+    Some(body[gt..end].trim().to_string())
+}
+
+/// True when a captured page body still looks like a WAF challenge (by its title).
+/// Used to retry on a fresh context: the interstitial can clear on a new attempt
+/// (new browser context, and a rotating proxy usually hands out a fresh exit IP).
+pub fn body_is_challenge(body: &str) -> bool {
+    html_title(body)
+        .as_deref()
+        .map(is_challenge_title)
+        .unwrap_or(false)
+}
+
 /// True when a navigation error matches the proxy/auth failures a *cold* first
 /// proxied request can produce: the initial proxied CONNECT can race ahead of
 /// the CDP Fetch auth-interception that `authenticate()` enables, so Chrome
@@ -152,6 +171,34 @@ pub fn is_proxy_retryable_error(msg: &str) -> bool {
         "ERR_INVALID_AUTH_CREDENTIALS",
         "ERR_PROXY_AUTH_REQUESTED",
         "ERR_NO_SUPPORTED_PROXIES",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
+/// True for a transient proxy/network error worth retrying on a fresh context
+/// (a flaky proxy drops/times out individual connections). Stable failures (DNS,
+/// bad target) are excluded so they fail fast.
+pub fn is_transient_fetch_error(msg: &str) -> bool {
+    let m = msg.to_ascii_uppercase();
+    [
+        "ERR_EMPTY_RESPONSE",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_CLOSED",
+        "ERR_CONNECTION_ABORTED",
+        "ERR_CONNECTION_FAILED",
+        "ERR_CONNECTION_TIMED_OUT",
+        "ERR_TIMED_OUT",
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_INVALID_AUTH_CREDENTIALS",
+        "ERR_PROXY_AUTH_REQUESTED",
+        "ERR_NO_SUPPORTED_PROXIES",
+        "ERR_SOCKS_CONNECTION_FAILED",
+        "ERR_HTTP2_PROTOCOL_ERROR",
+        "ERR_NETWORK_CHANGED",
+        "ERR_ABORTED",
+        "REQUEST TIMED OUT",
     ]
     .iter()
     .any(|needle| m.contains(needle))
@@ -260,36 +307,30 @@ pub fn page_settled(ready: bool, challenge: bool, network_idle: bool, quiet: Dur
     (network_idle && quiet >= SETTLE_QUIET) || quiet >= MAX_QUIET
 }
 
-/// Wait until the page has settled on real content or a challenge has been solved,
-/// up to `max`. Returns as soon as either:
-///   - a `cf_clearance` cookie appears (Cloudflare cleared), or
-///   - the page is `readyState=complete`, not a challenge, and has gone
-///     network-idle with a stable DOM ([`page_settled`]).
+/// Wait (up to `max`) until the page settles on real content — `readyState=complete`,
+/// not a challenge, network-idle with a stable DOM ([`page_settled`]) — so post-load
+/// JS finishes before capture.
 ///
-/// Waiting for network-idle + DOM stability (rather than snapshotting at
-/// `readyState=complete`) lets post-load JS finish — XHR-rendered content, SPA
-/// hydration, web-worker fingerprint tests — before we capture the DOM.
-///
-/// Interactive Cloudflare Turnstile widgets are clicked after a passive window —
-/// CF's managed-challenge JS runs its invisible proof-of-work first, and touching
-/// the DOM too early raises the bot score.
+/// Cloudflare sets `cf_clearance` *before* reloading the interstitial to the real
+/// page, so we don't capture on the cookie; it only bounds the post-clearance wait
+/// ([`POST_CLEARANCE_MAX`]). Turnstile widgets are clicked only after a passive
+/// window — clicking too early raises the bot score.
 async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
     const PASSIVE_WAIT: Duration = Duration::from_millis(6_000);
     const CLICK_INTERVAL: Duration = Duration::from_millis(1_200);
     const POLL: Duration = Duration::from_millis(400);
+    /// After `cf_clearance` appears, how long to wait for CF's reload-to-real-page
+    /// before returning best-effort (covers slow proxied reloads).
+    const POST_CLEARANCE_MAX: Duration = Duration::from_millis(10_000);
 
     let start = Instant::now();
     let mut last_click: Option<Instant> = None;
     let mut prev_dom: Option<u64> = None;
     let mut last_dom_change = start;
+    let mut clearance_at: Option<Instant> = None;
 
     loop {
         if start.elapsed() >= max {
-            return;
-        }
-
-        if has_clearance_cookie(page).await {
-            tokio::time::sleep(Duration::from_millis(500)).await;
             return;
         }
 
@@ -298,6 +339,12 @@ async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
         if prev_dom != Some(st.dom_len) {
             prev_dom = Some(st.dom_len);
             last_dom_change = Instant::now();
+        }
+
+        // Note first cf_clearance; capture still waits for real content (below).
+        if clearance_at.is_none() && has_clearance_cookie(page).await {
+            clearance_at = Some(Instant::now());
+            tracing::info!("cf_clearance obtained; waiting for the real page");
         }
 
         if page_settled(
@@ -309,10 +356,16 @@ async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
             return;
         }
 
+        // Cleared but never settled within the window — return best-effort.
+        if clearance_at.is_some_and(|t| t.elapsed() >= POST_CLEARANCE_MAX) {
+            return;
+        }
+
         if st.turnstile
             && start.elapsed() >= PASSIVE_WAIT
             && last_click.is_none_or(|t| t.elapsed() >= CLICK_INTERVAL)
         {
+            tracing::info!("clicking Turnstile challenge widget");
             try_click_challenge(page).await;
             last_click = Some(Instant::now());
         }
@@ -321,9 +374,15 @@ async fn solve_and_wait(page: &Page, chaser: &ChaserPage, max: Duration) {
     }
 }
 
-/// Drive a fetch entirely through the browser: navigate, solve any challenge, and
-/// return the rendered DOM (GET) or an in-page POST response — all from the one
-/// stealth session that passed the WAF.
+/// Full fetch attempts (initial + retries) on a transient proxy/network error.
+const MAX_FETCH_ATTEMPTS: u32 = 3;
+/// Only retry if at least this much timeout budget remains for a fresh attempt.
+const MIN_RETRY_BUDGET: Duration = Duration::from_millis(20_000);
+
+/// Drive a fetch through the browser, retrying transient proxy/network failures on
+/// a fresh context (a flaky proxy's per-connection drops usually clear on retry).
+/// Bounded by [`MAX_FETCH_ATTEMPTS`] and the remaining timeout budget, so a slow
+/// challenge is never retried.
 pub async fn fetch(
     browser: &BrowserManager,
     url: &str,
@@ -332,6 +391,68 @@ pub async fn fetch(
     proxy_url: Option<&str>,
     extra_cookies: &[RequestCookie],
     max_timeout_ms: u64,
+) -> Result<FetchResponse> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(max_timeout_ms);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match fetch_once(
+            browser, url, is_post, post_data, proxy_url, extra_cookies, remaining,
+        )
+        .await
+        {
+            Ok(r) => {
+                // A GET that came back still showing a challenge (e.g. an interactive
+                // Turnstile that didn't resolve on a flagged proxy exit) is worth a
+                // fresh attempt — a new context/exit usually draws an easier challenge.
+                let budget_left = deadline.saturating_duration_since(Instant::now());
+                if !is_post
+                    && attempt < MAX_FETCH_ATTEMPTS
+                    && budget_left >= MIN_RETRY_BUDGET
+                    && body_is_challenge(&r.body)
+                {
+                    tracing::warn!(
+                        "challenge still present after solve on attempt {attempt}, retrying on a fresh context"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    "fetched {url} — {} bytes, {} cookies, attempt {attempt}, {}ms",
+                    r.body.len(),
+                    r.cookies.len(),
+                    started.elapsed().as_millis()
+                );
+                return Ok(r);
+            }
+            Err(e) => {
+                let budget_left = deadline.saturating_duration_since(Instant::now());
+                if attempt < MAX_FETCH_ATTEMPTS
+                    && budget_left >= MIN_RETRY_BUDGET
+                    && is_transient_fetch_error(&e.to_string())
+                {
+                    tracing::warn!("transient fetch error on attempt {attempt}, retrying: {e}");
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// One full fetch attempt: navigate, solve any challenge, and return the rendered
+/// DOM (GET) or an in-page POST response — all from the one stealth session that
+/// passed the WAF. `max` bounds the settle/solve wait (the remaining timeout budget).
+#[allow(clippy::too_many_arguments)]
+async fn fetch_once(
+    browser: &BrowserManager,
+    url: &str,
+    is_post: bool,
+    post_data: Option<&str>,
+    proxy_url: Option<&str>,
+    extra_cookies: &[RequestCookie],
+    max: Duration,
 ) -> Result<FetchResponse> {
     let proxy = proxy_url
         .filter(|p| !p.is_empty())
@@ -375,11 +496,9 @@ pub async fn fetch(
         }
     }
 
-    // Navigate. The first proxied request can lose a race between the proxy
-    // CONNECT and the CDP Fetch auth-interception set up above, surfacing as
-    // ERR_TUNNEL_CONNECTION_FAILED / ERR_INVALID_AUTH_CREDENTIALS even when the
-    // credentials are correct. The handler is active by the time that error
-    // returns, so retry the navigation once for authenticated proxies.
+    // First proxied CONNECT can race ahead of the CDP Fetch auth handler set up
+    // above (ERR_TUNNEL_CONNECTION_FAILED / ERR_INVALID_AUTH_CREDENTIALS); retry
+    // the navigation once for authenticated proxies.
     let proxy_auth = proxy
         .as_ref()
         .is_some_and(|p| p.username.is_some() && p.password.is_some());
@@ -404,7 +523,7 @@ pub async fn fetch(
         let _ = chaser.evaluate(&js).await;
     }
 
-    solve_and_wait(&page, &chaser, Duration::from_millis(max_timeout_ms)).await;
+    solve_and_wait(&page, &chaser, max).await;
 
     let user_agent = chaser
         .evaluate("navigator.userAgent")
@@ -608,6 +727,67 @@ fn find_shadow_challenge_node(node: &Node) -> Option<NodeId> {
     None
 }
 
+/// Return the first non-empty entry (trimmed) from `candidates` — used to pick
+/// an effective proxy URL from an ordered list of candidate sources.
+#[cfg(feature = "server")]
+pub fn pick_proxy<I, S>(candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    candidates
+        .into_iter()
+        .map(|s| s.as_ref().trim().to_string())
+        .find(|s| !s.is_empty())
+}
+
+/// Proxy environment variables honored for the fallback, in priority order
+/// (HTTPS first, since we fetch https URLs).
+#[cfg(feature = "server")]
+const PROXY_ENV_VARS: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+/// The proxy configured via the process environment, resolved through `lookup`
+/// (injected so the precedence is unit-testable without touching global env).
+/// First non-empty of [`PROXY_ENV_VARS`] wins.
+#[cfg(feature = "server")]
+pub fn env_proxy_from<F>(lookup: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    pick_proxy(PROXY_ENV_VARS.iter().filter_map(|k| lookup(k)))
+}
+
+/// The proxy from the process environment (`HTTPS_PROXY` etc.), if any. Lets a
+/// deployment set a global upstream proxy for requests without their own. Chrome
+/// inherits these too but can't authenticate from the embedded `user:pass@`;
+/// routing the value through [`fetch`]'s per-context proxy + CDP auth is what makes
+/// an authenticated container proxy work (else: `net::ERR_INVALID_AUTH_CREDENTIALS`).
+#[cfg(feature = "server")]
+pub fn env_proxy() -> Option<String> {
+    env_proxy_from(|k| std::env::var(k).ok())
+}
+
+/// The environment proxy fallback, validated: `None` (today's no-proxy behavior)
+/// when unset or malformed, so a bad `HTTPS_PROXY` can't break every request.
+/// Credential-safe to log: no URL is named and [`parse_proxy_url`] errors carry no value.
+#[cfg(feature = "server")]
+fn resolve_env_proxy() -> Option<String> {
+    let ep = env_proxy()?;
+    if let Err(e) = parse_proxy_url(&ep) {
+        tracing::warn!("ignoring malformed environment proxy: {e}");
+        return None;
+    }
+    tracing::info!("no request proxy; routing upstream via environment proxy");
+    Some(ep)
+}
+
 /// Dispatch a FlareSolverr protocol command. Returns (status, message, Option<FetchResponse>).
 #[cfg(feature = "server")]
 #[allow(clippy::too_many_arguments)]
@@ -625,15 +805,20 @@ pub async fn dispatch(
     match cmd {
         "request.get" | "request.post" => {
             let url = url.ok_or_else(|| FlareSolverError::MissingField("url".into()))?;
-            let session_proxy = session_id.and_then(|id| store.registry.get_proxy(id));
-            let effective_proxy = session_proxy.as_deref().or(proxy_url);
+            // Proxy precedence: session-bound, then the request `proxy` field, then
+            // the environment (`HTTPS_PROXY` etc.) — the last authenticated over CDP
+            // so a container-wide proxy works.
+            let effective_proxy: Option<String> = session_id
+                .and_then(|id| store.registry.get_proxy(id))
+                .or_else(|| proxy_url.map(str::to_string))
+                .or_else(resolve_env_proxy);
             let browser = store.browser().await?;
             let resp = fetch(
                 browser,
                 url,
                 is_post,
                 post_data,
-                effective_proxy,
+                effective_proxy.as_deref(),
                 extra_cookies,
                 max_timeout_ms,
             )
