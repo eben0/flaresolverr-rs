@@ -61,7 +61,7 @@ jobs:
         run: mv flaresolverr-rs flaresolverr-rs-linux-amd64 && chmod +x flaresolverr-rs-linux-amd64
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: flaresolverr-rs-linux-amd64
           generate_release_notes: true
