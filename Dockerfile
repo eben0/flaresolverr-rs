@@ -7,6 +7,7 @@ FROM debian:bookworm-slim
 
 ARG VERSION
 ARG TARGETARCH
+ARG REPO=eben0/flaresolverr-rs
 
 # Chrome shared-library deps + Xvfb for virtual display.
 # Google ships no linux/arm64 Chrome build, so arm64 uses Debian Chromium (auto-detected).
@@ -32,9 +33,9 @@ WORKDIR /app
 
 # Download pre-built binary from GitHub releases
 RUN if [ "$VERSION" = "latest" ]; then \
-        URL="https://github.com/eben0/flaresolverr-rs/releases/latest/download/flaresolverr-rs-linux-${TARGETARCH}"; \
+        URL="https://github.com/${REPO}/releases/latest/download/flaresolverr-rs-linux-${TARGETARCH}"; \
     else \
-        URL="https://github.com/eben0/flaresolverr-rs/releases/download/v${VERSION}/flaresolverr-rs-linux-${TARGETARCH}"; \
+        URL="https://github.com/${REPO}/releases/download/v${VERSION}/flaresolverr-rs-linux-${TARGETARCH}"; \
     fi \
     && wget -qO flaresolverr-rs "$URL" \
     && chmod +x flaresolverr-rs

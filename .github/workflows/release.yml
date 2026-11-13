@@ -131,5 +131,6 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
+            REPO=${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

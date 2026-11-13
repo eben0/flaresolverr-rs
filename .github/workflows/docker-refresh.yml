@@ -43,3 +43,4 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
             VERSION=latest
+            REPO=${{ github.repository }}
