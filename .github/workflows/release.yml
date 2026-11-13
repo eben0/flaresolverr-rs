@@ -11,8 +11,15 @@ env:
 
 jobs:
   build-binary:
-    name: Build binary
-    runs-on: ubuntu-latest
+    name: Build binary (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     # Build inside Debian bookworm (glibc 2.36) so the binary matches the
     # debian:bookworm-slim runtime. Building on ubuntu-latest (glibc 2.39)
     # produced binaries that failed at runtime with:
@@ -33,7 +40,7 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-cargo-bookworm-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-bookworm-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
         run: cargo build --release --bin flaresolverr-rs
@@ -41,7 +48,7 @@ jobs:
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7
         with:
-          name: flaresolverr-rs-linux-amd64
+          name: flaresolverr-rs-linux-${{ matrix.arch }}
           path: target/release/flaresolverr-rs
           retention-days: 1
 
@@ -52,18 +59,26 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download binary artifact
+      - name: Download binary artifacts
         uses: actions/download-artifact@v8
         with:
-          name: flaresolverr-rs-linux-amd64
+          pattern: flaresolverr-rs-linux-*
 
-      - name: Rename binary
-        run: mv flaresolverr-rs flaresolverr-rs-linux-amd64 && chmod +x flaresolverr-rs-linux-amd64
+      - name: Rename binaries
+        run: |
+          for arch in amd64 arm64; do
+            mv "flaresolverr-rs-linux-${arch}/flaresolverr-rs" "flaresolverr-rs-linux-${arch}.bin"
+            rmdir "flaresolverr-rs-linux-${arch}"
+            mv "flaresolverr-rs-linux-${arch}.bin" "flaresolverr-rs-linux-${arch}"
+            chmod +x "flaresolverr-rs-linux-${arch}"
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: flaresolverr-rs-linux-amd64
+          files: |
+            flaresolverr-rs-linux-amd64
+            flaresolverr-rs-linux-arm64
           generate_release_notes: true
 
   docker:
@@ -89,6 +104,9 @@ jobs:
           echo "major=${MAJOR}" >> "$GITHUB_OUTPUT"
           echo "major_minor=${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -103,7 +121,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           pull: true
           tags: |
@@ -113,5 +131,6 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
+            REPO=${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
