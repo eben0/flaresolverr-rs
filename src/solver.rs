@@ -684,8 +684,27 @@ async fn try_click_challenge(page: &Page) {
 }
 
 /// Walk the CDP DOM tree and return the NodeId to click for a Turnstile challenge.
-fn find_shadow_challenge_node(node: &Node) -> Option<NodeId> {
+pub fn find_shadow_challenge_node(node: &Node) -> Option<NodeId> {
     let children = node.children.as_deref().unwrap_or(&[]);
+
+    // Standalone widgets (e.g. a login form's Turnstile): the host's shadow root
+    // holds the challenge iframe and the response input is a light-DOM sibling.
+    for sr in node.shadow_roots.as_deref().unwrap_or(&[]) {
+        for sr_child in sr.children.as_deref().unwrap_or(&[]) {
+            let is_challenge_iframe = sr_child.node_name == "IFRAME"
+                && sr_child
+                    .attributes
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .chunks(2)
+                    .any(|p| {
+                        p.len() == 2 && p[0] == "src" && p[1].contains("challenges.cloudflare.com")
+                    });
+            if is_challenge_iframe {
+                return Some(sr_child.node_id);
+            }
+        }
+    }
 
     let is_shadow_host = children.iter().any(|child| {
         child
