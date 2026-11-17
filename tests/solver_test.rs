@@ -3,8 +3,9 @@ use std::time::Duration;
 use chaser_cf::Cookie;
 use flaresolverr_rs::models::ProxyConfig;
 use flaresolverr_rs::solver::{
-    body_is_challenge, chaser_cookie_to_response, env_proxy_from, is_challenge_title,
-    is_proxy_retryable_error, is_transient_fetch_error, page_settled, parse_proxy_url, pick_proxy,
+    body_is_challenge, chaser_cookie_to_response, env_proxy_from, find_shadow_challenge_node,
+    is_challenge_title, is_proxy_retryable_error, is_transient_fetch_error, page_settled,
+    parse_proxy_url, pick_proxy,
 };
 
 #[test]
@@ -227,4 +228,57 @@ fn test_env_proxy_falls_through_empty_var_to_next() {
 #[test]
 fn test_env_proxy_none_when_unset() {
     assert_eq!(env_proxy_from(|_| None), None);
+}
+
+#[test]
+fn test_find_challenge_iframe_in_shadow_root() {
+    // A Turnstile host div whose shadow root holds the challenge iframe, with the
+    // response input as a light-DOM sibling of the host.
+    let node = |id: i64, name: &str, attrs: serde_json::Value, extra: serde_json::Value| {
+        let mut n = serde_json::json!({
+            "nodeId": id, "backendNodeId": id, "nodeType": 1,
+            "nodeName": name, "localName": name.to_lowercase(), "nodeValue": "",
+            "attributes": attrs,
+        });
+        n.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        n
+    };
+    let none = serde_json::json!({});
+    let iframe = node(
+        4,
+        "IFRAME",
+        serde_json::json!(["src", "https://challenges.cloudflare.com/cdn-cgi/x"]),
+        none.clone(),
+    );
+    let shadow_root = node(
+        3,
+        "#document-fragment",
+        serde_json::json!([]),
+        serde_json::json!({ "children": [iframe] }),
+    );
+    let host = node(
+        2,
+        "DIV",
+        serde_json::json!([]),
+        serde_json::json!({ "shadowRoots": [shadow_root] }),
+    );
+    let input = node(
+        5,
+        "INPUT",
+        serde_json::json!(["name", "cf-turnstile-response"]),
+        none,
+    );
+    let root = node(
+        1,
+        "BODY",
+        serde_json::json!([]),
+        serde_json::json!({ "children": [host, input] }),
+    );
+    let root: chaser_oxide::cdp::browser_protocol::dom::Node =
+        serde_json::from_value(root).unwrap();
+
+    let id = find_shadow_challenge_node(&root).expect("challenge iframe found");
+    assert_eq!(*id.inner(), 4);
 }
