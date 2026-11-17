@@ -15,6 +15,8 @@ pub enum FlareSolverError {
     UnsupportedCommand(String),
     #[error("request timed out after {0}ms")]
     Timeout(u64),
+    #[error("challenge not solved after {0} attempts")]
+    ChallengeNotSolved(u32),
     #[error("http error: {0}")]
     Http(String),
 }

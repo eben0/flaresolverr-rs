@@ -158,6 +158,12 @@ pub fn body_is_challenge(body: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True when a GET response is a failed solve: the body still shows a challenge and
+/// no `cf_clearance` cookie came with it (a cookie-bearing page is usable by callers).
+pub fn is_unsolved_challenge(is_post: bool, r: &FetchResponse) -> bool {
+    !is_post && body_is_challenge(&r.body) && !r.cookies.iter().any(|c| c.name == "cf_clearance")
+}
+
 /// True when a navigation error matches the proxy/auth failures a *cold* first
 /// proxied request can produce: the initial proxied CONNECT can race ahead of
 /// the CDP Fetch auth-interception that `authenticate()` enables, so Chrome
@@ -411,12 +417,15 @@ pub async fn fetch(
                 if !is_post
                     && attempt < MAX_FETCH_ATTEMPTS
                     && budget_left >= MIN_RETRY_BUDGET
-                    && body_is_challenge(&r.body)
+                    && is_unsolved_challenge(is_post, &r)
                 {
                     tracing::warn!(
                         "challenge still present after solve on attempt {attempt}, retrying on a fresh context"
                     );
                     continue;
+                }
+                if is_unsolved_challenge(is_post, &r) {
+                    return Err(FlareSolverError::ChallengeNotSolved(attempt));
                 }
                 tracing::info!(
                     "fetched {url} — {} bytes, {} cookies, attempt {attempt}, {}ms",
