@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chaser_cf::Cookie;
-use flaresolverr_rs::models::ProxyConfig;
+use flaresolverr_rs::models::{FetchResponse, ProxyConfig};
 use flaresolverr_rs::solver::{
     body_is_challenge, chaser_cookie_to_response, env_proxy_from, is_challenge_title,
-    is_proxy_retryable_error, is_transient_fetch_error, page_settled, parse_proxy_url, pick_proxy,
+    is_proxy_retryable_error, is_transient_fetch_error, is_unsolved_challenge, page_settled,
+    parse_proxy_url, pick_proxy,
 };
 
 #[test]
@@ -104,6 +106,37 @@ fn test_page_settled_on_network_idle_plus_dom_quiet() {
     assert!(page_settled(true, false, true, Duration::from_millis(600)));
     // idle but DOM not yet quiet long enough → keep waiting
     assert!(!page_settled(true, false, true, Duration::from_millis(599)));
+}
+
+#[test]
+fn test_is_unsolved_challenge_needs_challenge_body_and_no_clearance() {
+    let resp = |body: &str, cookie: Option<&str>| FetchResponse {
+        url: "https://example.com/".into(),
+        status: 200,
+        headers: HashMap::new(),
+        body: body.into(),
+        cookies: cookie
+            .map(|n| {
+                chaser_cookie_to_response(Cookie {
+                    name: n.into(),
+                    value: "v".into(),
+                    domain: None,
+                    path: None,
+                    expires: None,
+                    http_only: None,
+                    secure: None,
+                    same_site: None,
+                })
+            })
+            .into_iter()
+            .collect(),
+        user_agent: String::new(),
+    };
+    let challenge = "<html><head><title>Just a moment...</title></head></html>";
+    assert!(is_unsolved_challenge(false, &resp(challenge, None)));
+    assert!(!is_unsolved_challenge(false, &resp(challenge, Some("cf_clearance"))));
+    assert!(!is_unsolved_challenge(false, &resp("<title>Home</title>", None)));
+    assert!(!is_unsolved_challenge(true, &resp(challenge, None)));
 }
 
 #[test]
